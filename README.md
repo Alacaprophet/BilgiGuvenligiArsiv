@@ -11,26 +11,28 @@ donusturen, sade ve okunabilir bir masaustu programi (Tkinter arayuzu, Turkce).
 
 ## Ekran / Kullanim ozeti
 
-Program iki sekme sunar:
+Program iki sekme sunar.
 
-### 1) Posta Kutusu → PST  *(en guvenilir)*
-Outlook'ta tanimli bir hesabin OST onbellegini **tam sadakatle** yeni bir PST'ye
-kopyalar. Outlook'un kendi COM/MAPI arayuzu kullanildigi icin sonuc dosyasi her
-Outlook kurulumunda sorunsuz acilir.
+### 1) OST Dosyasi → PST  *(ana akis)*
+Diskteki bir `.ost` dosyasini **elle secersiniz** — dosyanin bir Outlook
+profiline bagli olmasi gerekmez (eski yedekler, orphan dosyalar dahil).
 
-1. **Posta kutularini listele**'ye basin.
-2. Acilan listeden hesabinizi (OST) secin.
-3. **Hedef PST dosyasi** yolunu belirleyin.
-4. **PST'ye Donustur**.
+1. **Dosya sec...** ile kaynak `.ost` dosyasini secin.
+2. **Cikti bicimi** secin: PST (Outlook gerekli) / EML klasoru / MBOX.
+3. **Klasor sec...** ile yalnizca bir **hedef klasor** secin.
+4. **Donustur**. Cikti dosyasi, kaynak OST adina gore **bu klasorde otomatik
+   olusturulur** (orn. `Outlook.ost` → `Outlook.pst`). Ayni ada sahip dosya
+   varsa sonuna sayi eklenir.
 
-### 2) OST Dosyasi → PST / EML
-Diskteki bir `.ost` dosyasini **dogrudan** okur — dosyanin bir Outlook profiline
-bagli olmasi gerekmez (eski yedekler, orphan dosyalar dahil).
+> PST cikti icin Outlook gerekir (dosya libpff ile okunur, gercek PST Outlook
+> ile uretilir). Outlook yoksa **EML klasoru** veya **MBOX** secerek icerigi
+> kurtarabilirsiniz.
 
-- **PST** cikti: dosya libpff ile okunur, ardindan Outlook ile gercek bir PST
-  uretilir. *(Outlook gerektirir.)*
-- **EML klasoru** / **MBOX**: Outlook olmadan da calisir; icerigi kurtarmak ve
-  baska programlara (Thunderbird vb.) tasimak icin idealdir.
+### 2) Posta Kutusu → PST (Outlook hesabi)  *(en yuksek sadakat)*
+Outlook'ta **tanimli** bir hesabin OST onbellegini tam sadakatle PST'ye kopyalar.
+Hesap listesi bos gelirse Outlook'ta yapilandirilmis hesap yok demektir; bu
+durumda 1. sekmeyi kullanin. Hedef yine yalnizca bir **klasordur**; PST dosyasi
+posta kutusu adina gore otomatik olusturulur.
 
 Alttaki **Durum** panelinde ilerleme cubugu ve ayrintili gunluk gosterilir.
 

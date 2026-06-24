@@ -3,13 +3,18 @@
 Her sey net, okunabilir ve Turkce. Donusum islemleri ayri bir is parcaciginda
 calisir; arayuz hicbir zaman donmaz. Ilerleme ve gunluk mesajlari bir kuyruk
 araciligi ile guvenli sekilde ana parcaciga aktarilir.
+
+Ana akis: kullanici .ost dosyasini ELLE secer, hedef olarak yalnizca bir
+KLASOR secer; cikti dosyasi (PST / EML / MBOX) o klasorde otomatik olusturulur.
 """
 
 from __future__ import annotations
 
 import os
 import queue
+import re
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -17,6 +22,24 @@ from converter import orchestrator as core
 
 APP_TITLE = "OST → PST Donusturucu"
 PAD = 10
+_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_name(name: str, fallback: str = "cikti") -> str:
+    name = _INVALID.sub("_", (name or "").strip()) or fallback
+    return name[:80]
+
+
+def _unique_path(path: str) -> str:
+    """Dosya/klasor zaten varsa sonuna sayi ekleyerek benzersiz yol uretir."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    for i in range(1, 1000):
+        cand = f"{base}_{i}{ext}"
+        if not os.path.exists(cand):
+            return cand
+    return f"{base}_{int(time.time())}{ext}"
 
 
 class App(ttk.Frame):
@@ -67,8 +90,8 @@ class App(ttk.Frame):
         )
         ttk.Label(
             head,
-            text="Outlook OST dosyalarinizi, Outlook'un sorunsuz acabilecegi "
-            "PST dosyalarina donusturun.",
+            text="OST dosyanizi secin, hedef klasoru secin; PST dosyasi otomatik "
+            "olusturulur.",
             style="Sub.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, PAD))
 
@@ -76,56 +99,20 @@ class App(ttk.Frame):
         nb = ttk.Notebook(self)
         nb.grid(row=1, column=0, sticky="nsew")
         self.rowconfigure(1, weight=0)
-        self._build_tab_mailbox(nb)
+        # Ana akis once: OST dosyasini elle sec.
         self._build_tab_file(nb)
+        self._build_tab_mailbox(nb)
 
-    # ---- Sekme 1: Bagli posta kutusu -> PST ---------------------------- #
-    def _build_tab_mailbox(self, nb: ttk.Notebook) -> None:
-        tab = ttk.Frame(nb, padding=PAD)
-        tab.columnconfigure(1, weight=1)
-        nb.add(tab, text="  Posta Kutusu → PST  ")
-
-        ttk.Label(
-            tab,
-            text="Outlook'ta tanimli bir hesabin OST onbellegini, tam sadakatle "
-            "yeni bir PST dosyasina kopyalar.\nBu yontem en guvenilir olanidir "
-            "(Windows + Outlook gerektirir).",
-            justify="left",
-        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, PAD))
-
-        ttk.Button(
-            tab, text="Posta kutularini listele", command=self._load_stores
-        ).grid(row=1, column=0, sticky="w")
-        self.cmb_store = ttk.Combobox(tab, state="readonly", width=50)
-        self.cmb_store.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(PAD, 0))
-
-        ttk.Label(tab, text="Hedef PST dosyasi:").grid(
-            row=2, column=0, sticky="w", pady=(PAD, 0)
-        )
-        self.var_mbox_pst = tk.StringVar()
-        ttk.Entry(tab, textvariable=self.var_mbox_pst).grid(
-            row=2, column=1, sticky="ew", padx=(PAD, 0), pady=(PAD, 0)
-        )
-        ttk.Button(
-            tab, text="Gozat...", command=lambda: self._pick_save(self.var_mbox_pst, ".pst")
-        ).grid(row=2, column=2, sticky="w", padx=(PAD, 0), pady=(PAD, 0))
-
-        self.btn_mbox_go = ttk.Button(
-            tab, text="PST'ye Donustur", style="Go.TButton", command=self._run_mailbox
-        )
-        self.btn_mbox_go.grid(row=3, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
-
-    # ---- Sekme 2: OST dosyasi -> PST / EML / MBOX ---------------------- #
+    # ---- Sekme 1: OST dosyasi (elle sec) -> PST / EML / MBOX ----------- #
     def _build_tab_file(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=PAD)
         tab.columnconfigure(1, weight=1)
-        nb.add(tab, text="  OST Dosyasi → PST / EML  ")
+        nb.add(tab, text="  OST Dosyasi → PST  ")
 
         ttk.Label(
             tab,
-            text="Diskteki bir .ost dosyasini dogrudan okur (profile bagli olmayan "
-            "/ eski dosyalar dahil).\nPST cikti icin Outlook gerekir; Outlook yoksa "
-            "EML veya MBOX olarak kurtarabilirsiniz.",
+            text="Diskteki bir .ost dosyasini elle secin. PST cikti icin Outlook "
+            "gerekir;\nOutlook yoksa EML veya MBOX olarak kurtarabilirsiniz.",
             justify="left",
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, PAD))
 
@@ -134,7 +121,7 @@ class App(ttk.Frame):
         ttk.Entry(tab, textvariable=self.var_src_ost).grid(
             row=1, column=1, sticky="ew", padx=(PAD, 0)
         )
-        ttk.Button(tab, text="Gozat...", command=self._pick_ost).grid(
+        ttk.Button(tab, text="Dosya sec...", command=self._pick_ost).grid(
             row=1, column=2, sticky="w", padx=(PAD, 0)
         )
 
@@ -154,19 +141,64 @@ class App(ttk.Frame):
                 command=self._on_fmt_change,
             ).pack(side="left", padx=(0, PAD))
 
-        ttk.Label(tab, text="Hedef:").grid(row=3, column=0, sticky="w", pady=(PAD, 0))
-        self.var_dst = tk.StringVar()
-        ttk.Entry(tab, textvariable=self.var_dst).grid(
+        ttk.Label(tab, text="Hedef klasor:").grid(
+            row=3, column=0, sticky="w", pady=(PAD, 0)
+        )
+        self.var_dst_dir = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.var_dst_dir).grid(
             row=3, column=1, sticky="ew", padx=(PAD, 0), pady=(PAD, 0)
         )
-        ttk.Button(tab, text="Gozat...", command=self._pick_dst).grid(
+        ttk.Button(tab, text="Klasor sec...", command=self._pick_dst_dir).grid(
             row=3, column=2, sticky="w", padx=(PAD, 0), pady=(PAD, 0)
         )
+
+        ttk.Label(
+            tab,
+            text="Cikti dosyasi, kaynak OST adina gore bu klasorde otomatik "
+            "olusturulur.",
+            style="Sub.TLabel",
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         self.btn_file_go = ttk.Button(
             tab, text="Donustur", style="Go.TButton", command=self._run_file
         )
-        self.btn_file_go.grid(row=4, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
+        self.btn_file_go.grid(row=5, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
+
+    # ---- Sekme 2: Bagli posta kutusu -> PST  (Outlook hesabi varsa) ---- #
+    def _build_tab_mailbox(self, nb: ttk.Notebook) -> None:
+        tab = ttk.Frame(nb, padding=PAD)
+        tab.columnconfigure(1, weight=1)
+        nb.add(tab, text="  Posta Kutusu → PST (Outlook hesabi)  ")
+
+        ttk.Label(
+            tab,
+            text="Outlook'ta TANIMLI bir hesabin OST onbellegini tam sadakatle "
+            "PST'ye kopyalar.\nHesap listesi bossa, Outlook'ta yapilandirilmis "
+            "hesap yok demektir; bu durumda 1. sekmeyi kullanin.",
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, PAD))
+
+        ttk.Button(
+            tab, text="Posta kutularini listele", command=self._load_stores
+        ).grid(row=1, column=0, sticky="w")
+        self.cmb_store = ttk.Combobox(tab, state="readonly", width=50)
+        self.cmb_store.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(PAD, 0))
+
+        ttk.Label(tab, text="Hedef klasor:").grid(
+            row=2, column=0, sticky="w", pady=(PAD, 0)
+        )
+        self.var_mbox_dir = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.var_mbox_dir).grid(
+            row=2, column=1, sticky="ew", padx=(PAD, 0), pady=(PAD, 0)
+        )
+        ttk.Button(
+            tab, text="Klasor sec...", command=lambda: self._pick_dir(self.var_mbox_dir)
+        ).grid(row=2, column=2, sticky="w", padx=(PAD, 0), pady=(PAD, 0))
+
+        self.btn_mbox_go = ttk.Button(
+            tab, text="PST'ye Donustur", style="Go.TButton", command=self._run_mailbox
+        )
+        self.btn_mbox_go.grid(row=3, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
 
     def _build_progress_and_log(self) -> None:
         frame = ttk.LabelFrame(self, text="Durum", style="Card.TLabelframe")
@@ -212,17 +244,8 @@ class App(ttk.Frame):
         self._on_fmt_change()
 
     # ------------------------------------------------------------------ #
-    # Dosya secicileri
+    # Dosya / klasor secicileri
     # ------------------------------------------------------------------ #
-    def _pick_save(self, var: tk.StringVar, ext: str) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Hedef dosyayi secin",
-            defaultextension=ext,
-            filetypes=[("Outlook Veri Dosyasi", "*" + ext), ("Tum dosyalar", "*.*")],
-        )
-        if path:
-            var.set(path)
-
     def _pick_ost(self) -> None:
         path = filedialog.askopenfilename(
             title="OST dosyasini secin",
@@ -231,25 +254,15 @@ class App(ttk.Frame):
         if path:
             self.var_src_ost.set(path)
 
-    def _pick_dst(self) -> None:
-        fmt = self.var_fmt.get()
-        if fmt == "eml":
-            path = filedialog.askdirectory(title="EML cikti klasorunu secin")
-        elif fmt == "mbox":
-            path = filedialog.asksaveasfilename(
-                title="MBOX dosyasini secin", defaultextension=".mbox",
-                filetypes=[("MBOX", "*.mbox"), ("Tum dosyalar", "*.*")],
-            )
-        else:
-            path = filedialog.asksaveasfilename(
-                title="PST dosyasini secin", defaultextension=".pst",
-                filetypes=[("Outlook PST", "*.pst"), ("Tum dosyalar", "*.*")],
-            )
+    def _pick_dir(self, var: tk.StringVar) -> None:
+        path = filedialog.askdirectory(title="Hedef klasoru secin")
         if path:
-            self.var_dst.set(path)
+            var.set(path)
+
+    def _pick_dst_dir(self) -> None:
+        self._pick_dir(self.var_dst_dir)
 
     def _on_fmt_change(self) -> None:
-        # Gerekli motor yoksa kullaniciya ipucu ver.
         eng = core.available_engines()
         fmt = self.var_fmt.get()
         if fmt == "pst" and not eng["outlook"]:
@@ -266,7 +279,7 @@ class App(ttk.Frame):
             messagebox.showwarning(
                 APP_TITLE,
                 "Outlook / pywin32 bulunamadi.\nBu sekme yalnizca Windows + "
-                "Outlook ortaminda calisir.",
+                "Outlook ortaminda calisir. Lutfen 1. sekmeyi kullanin.",
             )
             return
         try:
@@ -280,11 +293,44 @@ class App(ttk.Frame):
             self.cmb_store.current(0)
             self._log(f"{len(labels)} posta kutusu bulundu.")
         else:
-            self._log("Profilde posta kutusu bulunamadi.")
+            self._log("Profilde yapilandirilmis posta kutusu bulunamadi.")
+            messagebox.showinfo(
+                APP_TITLE,
+                "Outlook'ta yapilandirilmis hesap bulunamadi.\n\n"
+                "OST dosyanizi dogrudan cevirmek icin 1. sekmeyi "
+                "('OST Dosyasi → PST') kullanin.",
+            )
 
     # ------------------------------------------------------------------ #
     # Calistirma
     # ------------------------------------------------------------------ #
+    def _run_file(self) -> None:
+        if self._busy:
+            return
+        src = self.var_src_ost.get().strip()
+        out_dir = self.var_dst_dir.get().strip()
+        if not src or not os.path.exists(src):
+            messagebox.showwarning(APP_TITLE, "Gecerli bir OST dosyasi secin.")
+            return
+        if not out_dir or not os.path.isdir(out_dir):
+            messagebox.showwarning(APP_TITLE, "Gecerli bir hedef klasor secin.")
+            return
+
+        base = _safe_name(os.path.splitext(os.path.basename(src))[0], "donusum")
+        fmt = self.var_fmt.get()
+        if fmt == "pst":
+            dst = _unique_path(os.path.join(out_dir, base + ".pst"))
+            fn = core.file_to_pst
+        elif fmt == "mbox":
+            dst = _unique_path(os.path.join(out_dir, base + ".mbox"))
+            fn = core.file_to_mbox
+        else:
+            dst = _unique_path(os.path.join(out_dir, base + "_eml"))
+            fn = core.file_to_eml
+
+        self._log(f"Cikti: {dst}")
+        self._start(fn, src, dst)
+
     def _run_mailbox(self) -> None:
         if self._busy:
             return
@@ -292,32 +338,18 @@ class App(ttk.Frame):
         if idx < 0 or idx >= len(self._stores):
             messagebox.showwarning(APP_TITLE, "Lutfen once bir posta kutusu secin.")
             return
-        pst = self.var_mbox_pst.get().strip()
-        if not pst:
-            messagebox.showwarning(APP_TITLE, "Lutfen hedef PST dosyasini belirtin.")
+        out_dir = self.var_mbox_dir.get().strip()
+        if not out_dir or not os.path.isdir(out_dir):
+            messagebox.showwarning(APP_TITLE, "Gecerli bir hedef klasor secin.")
             return
-        store_id = self._stores[idx].store_id
-        self._start(core.mailbox_to_pst, store_id, pst)
-
-    def _run_file(self) -> None:
-        if self._busy:
-            return
-        src = self.var_src_ost.get().strip()
-        dst = self.var_dst.get().strip()
-        if not src or not os.path.exists(src):
-            messagebox.showwarning(APP_TITLE, "Gecerli bir OST dosyasi secin.")
-            return
-        if not dst:
-            messagebox.showwarning(APP_TITLE, "Lutfen hedefi belirtin.")
-            return
-        fmt = self.var_fmt.get()
-        fn = {"pst": core.file_to_pst, "eml": core.file_to_eml,
-              "mbox": core.file_to_mbox}[fmt]
-        self._start(fn, src, dst)
+        store = self._stores[idx]
+        base = _safe_name(getattr(store, "name", "posta_kutusu"), "posta_kutusu")
+        dst = _unique_path(os.path.join(out_dir, base + ".pst"))
+        self._log(f"Cikti: {dst}")
+        self._start(core.mailbox_to_pst, store.store_id, dst)
 
     def _start(self, fn, *args) -> None:
         self._set_busy(True)
-        self._clear_log()
         self.progress["value"] = 0
         self.var_status.set("Calisiyor...")
 
@@ -386,17 +418,12 @@ class App(ttk.Frame):
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    def _clear_log(self) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
-
 
 def main() -> None:
     root = tk.Tk()
     root.title(APP_TITLE)
-    root.geometry("760x640")
-    root.minsize(640, 560)
+    root.geometry("780x660")
+    root.minsize(680, 580)
     App(root)
     root.mainloop()
 
