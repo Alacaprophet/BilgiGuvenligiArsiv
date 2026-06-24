@@ -153,6 +153,73 @@ def _count_items(folder) -> int:
     return total
 
 
+def _prepare_pst_path(pst_path: str) -> str:
+    """PST yolunu yerel (ters egik cizgili) mutlak bicime getirir ve dogrular."""
+    pst_path = os.path.normpath(os.path.abspath(pst_path))
+    if not pst_path.lower().endswith(".pst"):
+        pst_path += ".pst"
+    if os.path.exists(pst_path):
+        raise FileExistsError(
+            f"Hedef dosya zaten var: {pst_path}\n"
+            "Lutfen baska bir ad secin veya mevcut dosyayi tasiyin."
+        )
+    os.makedirs(os.path.dirname(pst_path) or ".", exist_ok=True)
+    return pst_path
+
+
+def _create_pst_store(ns, pst_path: str):
+    """Yeni bir Unicode PST store olusturup dondurur.
+
+    Outlook bazen (kurumsal politika veya yol kisitlari yuzunden) PST'yi
+    istenen klasor yerine varsayilan konuma (orn. Documents) koyar. Bu yuzden
+    yeni store'u YOLA gore degil, "az once eklenen store" olarak yakalariz;
+    boylece dosya nereye olusturulursa olusturulsun donusume devam edebiliriz.
+
+    Donus: (dest_store, gercek_pst_yolu)
+    """
+    before = set()
+    for i in range(1, ns.Stores.Count + 1):
+        try:
+            before.add(ns.Stores.Item(i).StoreID)
+        except Exception:
+            continue
+
+    ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
+
+    dest_store = None
+    # Once tam yol eslesmesini dene (istenen konuma olusturulduysa).
+    for i in range(1, ns.Stores.Count + 1):
+        st = ns.Stores.Item(i)
+        try:
+            if (st.FilePath or "").lower() == pst_path.lower():
+                dest_store = st
+                break
+        except Exception:
+            continue
+    # Bulunamazsa: yeni eklenen store hangisiyse onu al (Outlook baska yere
+    # koymus olabilir).
+    if dest_store is None:
+        for i in range(1, ns.Stores.Count + 1):
+            st = ns.Stores.Item(i)
+            try:
+                if st.StoreID not in before:
+                    dest_store = st
+                    break
+            except Exception:
+                continue
+    if dest_store is None:
+        raise RuntimeError(
+            "PST dosyasi olusturulamadi: Outlook yeni veri dosyasini ekleyemedi. "
+            "Outlook'un acik ve calisir durumda oldugundan emin olun; kurumsal "
+            "guvenlik politikasi yeni PST olusturmayi engelliyor olabilir."
+        )
+    try:
+        actual = dest_store.FilePath or pst_path
+    except Exception:
+        actual = pst_path
+    return dest_store, actual
+
+
 @_with_com
 def convert_store_to_pst(
     store_id: str,
@@ -176,16 +243,7 @@ def convert_store_to_pst(
         if progress:
             progress(msg, frac)
 
-    pst_path = os.path.abspath(pst_path)
-    if not pst_path.lower().endswith(".pst"):
-        pst_path += ".pst"
-    if os.path.exists(pst_path):
-        raise FileExistsError(
-            f"Hedef dosya zaten var: {pst_path}\n"
-            "Lutfen baska bir ad secin veya mevcut dosyayi tasiyin."
-        )
-
-    os.makedirs(os.path.dirname(pst_path) or ".", exist_ok=True)
+    pst_path = _prepare_pst_path(pst_path)
 
     ns = _namespace()
 
@@ -202,22 +260,10 @@ def convert_store_to_pst(
     source_root = source_store.GetRootFolder()
 
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
-
-    # Yeni eklenen PST store'unu dosya yoluna gore bul.
-    dest_store = None
-    for i in range(1, ns.Stores.Count + 1):
-        st = ns.Stores.Item(i)
-        try:
-            if (st.FilePath or "").lower() == pst_path.lower():
-                dest_store = st
-                break
-        except Exception:
-            continue
-    if dest_store is None:
-        raise RuntimeError("Olusturulan PST store profilde bulunamadi.")
-
+    dest_store, actual_path = _create_pst_store(ns, pst_path)
     dest_root = dest_store.GetRootFolder()
+    if actual_path and actual_path.lower() != pst_path.lower():
+        report(f"Not: PST su konumda olusturuldu: {actual_path}")
 
     # Kopyalanacak ust duzey klasorleri topla.
     top_folders = []
@@ -250,7 +296,7 @@ def convert_store_to_pst(
         pass
 
     report("Bitti.", 1.0)
-    return pst_path
+    return actual_path
 
 
 def _count_eml(root_dir: str) -> int:
@@ -279,28 +325,11 @@ def import_eml_tree_to_pst(
         if progress:
             progress(msg, frac)
 
-    pst_path = os.path.abspath(pst_path)
-    if not pst_path.lower().endswith(".pst"):
-        pst_path += ".pst"
-    if os.path.exists(pst_path):
-        raise FileExistsError(f"Hedef dosya zaten var: {pst_path}")
-    os.makedirs(os.path.dirname(pst_path) or ".", exist_ok=True)
+    pst_path = _prepare_pst_path(pst_path)
 
     ns = _namespace()
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
-
-    dest_store = None
-    for i in range(1, ns.Stores.Count + 1):
-        st = ns.Stores.Item(i)
-        try:
-            if (st.FilePath or "").lower() == pst_path.lower():
-                dest_store = st
-                break
-        except Exception:
-            continue
-    if dest_store is None:
-        raise RuntimeError("Olusturulan PST store profilde bulunamadi.")
+    dest_store, actual_path = _create_pst_store(ns, pst_path)
     dest_root = dest_store.GetRootFolder()
 
     total = max(1, _count_eml(eml_root))
@@ -385,7 +414,7 @@ def import_eml_tree_to_pst(
                1.0)
     else:
         report("Bitti.", 1.0)
-    return pst_path
+    return actual_path
 
 
 @_with_com
@@ -413,29 +442,14 @@ def import_stream_to_pst(
         if progress:
             progress(msg, frac)
 
-    pst_path = os.path.abspath(pst_path)
-    if not pst_path.lower().endswith(".pst"):
-        pst_path += ".pst"
-    if os.path.exists(pst_path):
-        raise FileExistsError(f"Hedef dosya zaten var: {pst_path}")
-    os.makedirs(os.path.dirname(pst_path) or ".", exist_ok=True)
+    pst_path = _prepare_pst_path(pst_path)
 
     ns = _namespace()
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
-
-    dest_store = None
-    for i in range(1, ns.Stores.Count + 1):
-        st = ns.Stores.Item(i)
-        try:
-            if (st.FilePath or "").lower() == pst_path.lower():
-                dest_store = st
-                break
-        except Exception:
-            continue
-    if dest_store is None:
-        raise RuntimeError("Olusturulan PST store profilde bulunamadi.")
+    dest_store, actual_path = _create_pst_store(ns, pst_path)
     dest_root = dest_store.GetRootFolder()
+    if actual_path and actual_path.lower() != pst_path.lower():
+        report(f"Not: PST su konumda olusturuldu: {actual_path}")
 
     total = max(1, int(total))
     done = 0
@@ -504,4 +518,4 @@ def import_stream_to_pst(
                1.0)
     else:
         report("Bitti.", 1.0)
-    return pst_path
+    return actual_path
