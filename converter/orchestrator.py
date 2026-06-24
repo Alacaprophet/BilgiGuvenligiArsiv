@@ -57,6 +57,32 @@ def list_outlook_stores() -> List["engine_outlook.StoreInfo"]:
 
 
 # --------------------------------------------------------------------------- #
+# OST icerigini kesfetme (arayuzdeki secim agaci icin)
+# --------------------------------------------------------------------------- #
+def list_ost_tree(ost_path: str) -> List[dict]:
+    """OST'nin klasor agacini (govde okumadan) dondurur."""
+    if not engine_libpff.is_available():
+        raise ConversionError(
+            "OST icerigini gostermek icin libpff gereklidir. "
+            "('pip install libpff-python')"
+        )
+    try:
+        return engine_libpff.build_tree(ost_path)
+    except Exception as exc:
+        raise ConversionError(_friendly_error(str(exc))) from exc
+
+
+def list_ost_folder_messages(ost_path: str, folder_id: str) -> List[dict]:
+    """Tek bir klasorun mesaj basliklarini tembel (lazy) listeler."""
+    if not engine_libpff.is_available():
+        raise ConversionError("libpff gerekli. ('pip install libpff-python')")
+    try:
+        return engine_libpff.list_folder_messages(ost_path, folder_id)
+    except Exception as exc:
+        raise ConversionError(_friendly_error(str(exc))) from exc
+
+
+# --------------------------------------------------------------------------- #
 # 1) Bagli posta kutusu (OST onbellegi) -> PST   (tam sadakat, en guvenilir)
 # --------------------------------------------------------------------------- #
 def mailbox_to_pst(store_id: str, pst_path: str, progress: Progress = None) -> str:
@@ -77,7 +103,8 @@ def mailbox_to_pst(store_id: str, pst_path: str, progress: Progress = None) -> s
 # 2) Disk uzerindeki .ost dosyasi -> PST
 #    libpff ile okunur, Outlook ile gercek PST'ye yazilir.
 # --------------------------------------------------------------------------- #
-def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None) -> str:
+def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
+                selection: Optional[Dict] = None) -> str:
     if not engine_libpff.is_available():
         raise ConversionError(
             "OST dosyasini okumak icin libpff gereklidir. "
@@ -105,7 +132,9 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None) -> str:
         def stage1(m: str, f: float) -> None:
             report(m, (f * 0.5) if f >= 0 else f)
 
-        engine_libpff.export_eml_tree(ost_path, tmp_dir, stage1, short_names=True)
+        engine_libpff.export_selected_eml(
+            ost_path, tmp_dir, selection, stage1, short_names=True
+        )
 
         report("Asama 2/2: Outlook ile PST olusturuluyor...", 0.5)
 
@@ -125,20 +154,26 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None) -> str:
 # --------------------------------------------------------------------------- #
 # 3) Disk uzerindeki .ost dosyasi -> EML agaci veya MBOX  (Outlook gerekmez)
 # --------------------------------------------------------------------------- #
-def file_to_eml(ost_path: str, out_dir: str, progress: Progress = None) -> str:
+def file_to_eml(ost_path: str, out_dir: str, progress: Progress = None,
+                selection: Optional[Dict] = None) -> str:
     if not engine_libpff.is_available():
         raise ConversionError("libpff gerekli. ('pip install libpff-python')")
     try:
-        return engine_libpff.export_eml_tree(ost_path, out_dir, progress)
+        return engine_libpff.export_selected_eml(
+            ost_path, out_dir, selection, progress
+        )
     except Exception as exc:
         raise ConversionError(_friendly_error(str(exc))) from exc
 
 
-def file_to_mbox(ost_path: str, mbox_path: str, progress: Progress = None) -> str:
+def file_to_mbox(ost_path: str, mbox_path: str, progress: Progress = None,
+                 selection: Optional[Dict] = None) -> str:
     if not engine_libpff.is_available():
         raise ConversionError("libpff gerekli. ('pip install libpff-python')")
     try:
-        return engine_libpff.export_mbox(ost_path, mbox_path, progress)
+        return engine_libpff.export_selected_mbox(
+            ost_path, mbox_path, selection, progress
+        )
     except Exception as exc:
         raise ConversionError(_friendly_error(str(exc))) from exc
 
@@ -149,6 +184,8 @@ class Conversion:
 
     available_engines = staticmethod(available_engines)
     list_outlook_stores = staticmethod(list_outlook_stores)
+    list_ost_tree = staticmethod(list_ost_tree)
+    list_ost_folder_messages = staticmethod(list_ost_folder_messages)
     mailbox_to_pst = staticmethod(mailbox_to_pst)
     file_to_pst = staticmethod(file_to_pst)
     file_to_eml = staticmethod(file_to_eml)

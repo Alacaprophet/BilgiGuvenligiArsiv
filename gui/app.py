@@ -4,18 +4,27 @@ Her sey net, okunabilir ve Turkce. Donusum islemleri ayri bir is parcaciginda
 calisir; arayuz hicbir zaman donmaz. Ilerleme ve gunluk mesajlari bir kuyruk
 araciligi ile guvenli sekilde ana parcaciga aktarilir.
 
-Ana akis: kullanici .ost dosyasini ELLE secer, hedef olarak yalnizca bir
-KLASOR secer; cikti dosyasi (PST / EML / MBOX) o klasorde otomatik olusturulur.
+Ana akis:
+    1. Kullanici ``.ost`` dosyasini ELLE secer.
+    2. Dosyanin klasor/mesaj agaci OTOMATIK gosterilir; kullanici onay
+       kutulariyla PST'ye gecirilecek klasor ve/veya mesajlari secer.
+    3. Hedef olarak bir KLASOR secilir; cikti dosyasi (PST / EML / MBOX) o
+       klasorde, kaynak OST adina gore otomatik olusturulur.
+
+Cikan PST, OST'deki klasor yapisini BIREBIR korur (klasor adlari yan dosya ile
+tasinir, kok sarmalayicilar duzlestirilir).
 """
 
 from __future__ import annotations
 
+import functools
 import os
 import queue
 import re
 import threading
 import time
 import tkinter as tk
+from collections import defaultdict
 from tkinter import filedialog, messagebox, ttk
 
 from converter import orchestrator as core
@@ -23,6 +32,11 @@ from converter import orchestrator as core
 APP_TITLE = "OST → PST Donusturucu"
 PAD = 10
 _INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Onay kutusu sembolleri (secili / secili degil / kismi).
+CHK_ON = "☑"
+CHK_OFF = "☐"
+CHK_PARTIAL = "▣"
 
 
 def _safe_name(name: str, fallback: str = "cikti") -> str:
@@ -55,6 +69,16 @@ class App(ttk.Frame):
         self._busy = False
         self._stores: list = []
 
+        # --- OST secim agaci durumu ---
+        self._current_ost: str = ""          # yuklu OST yolu
+        self._nodes: dict = {}               # fid -> dugum (id/parent/name/count)
+        self._children: dict = defaultdict(list)  # parent fid (veya None) -> [fid]
+        self._folder_state: dict = {}        # fid -> bool (klasor isaretli mi)
+        self._msg_override: dict = {}        # fid -> set(index) (mesaj bazli secim)
+        self._loaded: set = set()            # mesajlari yuklenmis fid'ler
+        self._msg_data: dict = {}            # fid -> {index: {subject,sender,date}}
+        self._tree_token = 0                 # eski yuklemeleri gecersiz kil
+
         self._build_style()
         self._build_header()
         self._build_tabs()
@@ -80,6 +104,7 @@ class App(ttk.Frame):
         style.configure("Go.TButton", font=("Segoe UI", 11, "bold"), padding=8)
         style.configure("TButton", padding=5)
         style.configure("TEntry", padding=4)
+        style.configure("Tree.Treeview", rowheight=22)
 
     def _build_header(self) -> None:
         head = ttk.Frame(self)
@@ -90,15 +115,15 @@ class App(ttk.Frame):
         )
         ttk.Label(
             head,
-            text="OST dosyanizi secin, hedef klasoru secin; PST dosyasi otomatik "
-            "olusturulur.",
+            text="OST dosyanizi secin; icerigi asagida gosterilir. Aktarmak "
+            "istediginiz klasor/mesajlari isaretleyip Donustur'e basin.",
             style="Sub.TLabel",
         ).grid(row=1, column=0, sticky="w", pady=(2, PAD))
 
     def _build_tabs(self) -> None:
         nb = ttk.Notebook(self)
         nb.grid(row=1, column=0, sticky="nsew")
-        self.rowconfigure(1, weight=0)
+        self.rowconfigure(1, weight=1)
         # Ana akis once: OST dosyasini elle sec.
         self._build_tab_file(nb)
         self._build_tab_mailbox(nb)
@@ -107,6 +132,7 @@ class App(ttk.Frame):
     def _build_tab_file(self, nb: ttk.Notebook) -> None:
         tab = ttk.Frame(nb, padding=PAD)
         tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(6, weight=1)
         nb.add(tab, text="  OST Dosyasi → PST  ")
 
         ttk.Label(
@@ -159,10 +185,43 @@ class App(ttk.Frame):
             style="Sub.TLabel",
         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
+        # ---- Icerik secim agaci ---- #
+        sel_head = ttk.Frame(tab)
+        sel_head.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(PAD, 2))
+        sel_head.columnconfigure(0, weight=1)
+        self.var_tree_info = tk.StringVar(
+            value="OST secince icerik burada gosterilir. Satira tiklayarak "
+            "isaretleyin; klasoru acinca mesajlari da tek tek secebilirsiniz."
+        )
+        ttk.Label(sel_head, textvariable=self.var_tree_info,
+                  style="Sub.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(sel_head, text="Tumunu sec",
+                   command=lambda: self._select_all(True)).grid(
+            row=0, column=1, sticky="e", padx=(PAD, 0))
+        ttk.Button(sel_head, text="Temizle",
+                   command=lambda: self._select_all(False)).grid(
+            row=0, column=2, sticky="e", padx=(4, 0))
+        ttk.Button(sel_head, text="Yenile",
+                   command=self._load_ost_tree).grid(
+            row=0, column=3, sticky="e", padx=(4, 0))
+
+        tree_wrap = ttk.Frame(tab)
+        tree_wrap.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        tree_wrap.columnconfigure(0, weight=1)
+        tree_wrap.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(tree_wrap, show="tree", selectmode="none",
+                                 style="Tree.Treeview", height=10)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        tsb = ttk.Scrollbar(tree_wrap, command=self.tree.yview)
+        tsb.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=tsb.set)
+        self.tree.bind("<Button-1>", self._on_tree_click, add="+")
+        self.tree.bind("<<TreeviewOpen>>", self._on_tree_open, add="+")
+
         self.btn_file_go = ttk.Button(
             tab, text="Donustur", style="Go.TButton", command=self._run_file
         )
-        self.btn_file_go.grid(row=5, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
+        self.btn_file_go.grid(row=7, column=0, columnspan=3, sticky="e", pady=(PAD, 0))
 
     # ---- Sekme 2: Bagli posta kutusu -> PST  (Outlook hesabi varsa) ---- #
     def _build_tab_mailbox(self, nb: ttk.Notebook) -> None:
@@ -218,7 +277,7 @@ class App(ttk.Frame):
         log_wrap.grid(row=2, column=0, sticky="nsew")
         log_wrap.columnconfigure(0, weight=1)
         log_wrap.rowconfigure(0, weight=1)
-        self.log = tk.Text(log_wrap, height=10, wrap="word", state="disabled",
+        self.log = tk.Text(log_wrap, height=8, wrap="word", state="disabled",
                            font=("Consolas", 9), background="#1e1e1e",
                            foreground="#d4d4d4", insertbackground="#d4d4d4")
         self.log.grid(row=0, column=0, sticky="nsew")
@@ -253,6 +312,7 @@ class App(ttk.Frame):
         )
         if path:
             self.var_src_ost.set(path)
+            self._load_ost_tree()
 
     def _pick_dir(self, var: tk.StringVar) -> None:
         path = filedialog.askdirectory(title="Hedef klasoru secin")
@@ -270,6 +330,216 @@ class App(ttk.Frame):
                                 "yoksa EML/MBOX secin.")
         else:
             self.var_status.set("Hazir.")
+
+    # ------------------------------------------------------------------ #
+    # OST icerik agaci
+    # ------------------------------------------------------------------ #
+    def _clear_tree(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        self._nodes = {}
+        self._children = defaultdict(list)
+        self._folder_state = {}
+        self._msg_override = {}
+        self._loaded = set()
+        self._msg_data = {}
+
+    def _load_ost_tree(self) -> None:
+        """Secili OST'nin klasor agacini (ayri parcacikta) yukler."""
+        src = self.var_src_ost.get().strip()
+        self._clear_tree()
+        if not src or not os.path.exists(src):
+            self.var_tree_info.set("Gecerli bir OST dosyasi secin.")
+            return
+        if not core.available_engines()["libpff"]:
+            self.var_tree_info.set(
+                "Icerik onizleme icin libpff gerekli ('pip install libpff-python'). "
+                "Yine de tum dosyayi donusturebilirsiniz."
+            )
+            return
+        self._current_ost = os.path.normpath(src)
+        self.var_tree_info.set("Icerik okunuyor...")
+        self._tree_token += 1
+        token = self._tree_token
+
+        def work() -> None:
+            try:
+                nodes = core.list_ost_tree(self._current_ost)
+                self._queue.put(("tree", token, nodes))
+            except Exception as exc:
+                self._queue.put(("tree_err", token, str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _populate_tree(self, nodes: list) -> None:
+        self._clear_tree()
+        for n in nodes:
+            fid = n["id"]
+            self._nodes[fid] = n
+            self._folder_state[fid] = True  # varsayilan: hepsi secili
+            self._children[n["parent"]].append(fid)
+            parent_iid = ("F:" + n["parent"]) if n["parent"] else ""
+            try:
+                self.tree.insert(parent_iid, "end", iid="F:" + fid,
+                                 text=self._folder_text(fid), open=False)
+            except tk.TclError:
+                continue
+            if n["count"] > 0:
+                # Tembel yukleme icin gecici dugum.
+                self.tree.insert("F:" + fid, "end", iid="D:" + fid,
+                                 text="  (mesajlari gormek icin acin)")
+        total_msgs = sum(n["count"] for n in nodes)
+        self.var_tree_info.set(
+            f"{len(nodes)} klasor, {total_msgs} mesaj. Aktarilacaklari isaretleyin "
+            "(varsayilan: hepsi secili)."
+        )
+
+    # ---- onay kutusu / metin ---- #
+    def _folder_glyph(self, fid: str) -> str:
+        ov = self._msg_override.get(fid)
+        count = self._nodes[fid]["count"]
+        if ov is not None and 0 < len(ov) < count:
+            return CHK_PARTIAL
+        return CHK_ON if self._folder_state.get(fid) else CHK_OFF
+
+    def _folder_text(self, fid: str) -> str:
+        n = self._nodes[fid]
+        suffix = f"   [{n['count']}]" if n["count"] else ""
+        return f"{self._folder_glyph(fid)}  {n['name']}{suffix}"
+
+    def _msg_included(self, fid: str, idx: int) -> bool:
+        ov = self._msg_override.get(fid)
+        if ov is None:
+            return bool(self._folder_state.get(fid))
+        return idx in ov
+
+    def _msg_text(self, fid: str, idx: int) -> str:
+        m = self._msg_data.get(fid, {}).get(idx, {})
+        glyph = CHK_ON if self._msg_included(fid, idx) else CHK_OFF
+        subject = m.get("subject", "(konusuz)")
+        sender = m.get("sender", "")
+        date = m.get("date", "")
+        meta = "  —  ".join(x for x in (sender, date) if x)
+        tail = f"   ({meta})" if meta else ""
+        return f"{glyph}  {subject}{tail}"
+
+    def _update_folder_row(self, fid: str) -> None:
+        if self.tree.exists("F:" + fid):
+            self.tree.item("F:" + fid, text=self._folder_text(fid))
+
+    def _update_loaded_msgs(self, fid: str) -> None:
+        if fid not in self._loaded:
+            return
+        for miid in self.tree.get_children("F:" + fid):
+            if miid.startswith("M:"):
+                idx = int(miid.rsplit("|", 1)[1])
+                self.tree.item(miid, text=self._msg_text(fid, idx))
+
+    def _norm_override(self, fid: str) -> None:
+        """Mesaj secimi tamamen dolu/bos ise klasor durumuna sadelestirir."""
+        ov = self._msg_override.get(fid)
+        if ov is None:
+            return
+        count = self._nodes[fid]["count"]
+        if len(ov) == 0:
+            self._msg_override.pop(fid, None)
+            self._folder_state[fid] = False
+        elif len(ov) >= count:
+            self._msg_override.pop(fid, None)
+            self._folder_state[fid] = True
+
+    def _set_folder_checked(self, fid: str, val: bool, cascade: bool = True) -> None:
+        self._folder_state[fid] = val
+        self._msg_override.pop(fid, None)
+        self._update_folder_row(fid)
+        self._update_loaded_msgs(fid)
+        if cascade:
+            for child in self._children.get(fid, []):
+                self._set_folder_checked(child, val, True)
+
+    def _toggle_msg(self, fid: str, idx: int) -> None:
+        count = self._nodes[fid]["count"]
+        ov = self._msg_override.get(fid)
+        if ov is None:
+            ov = set(range(count)) if self._folder_state.get(fid) else set()
+        else:
+            ov = set(ov)
+        if idx in ov:
+            ov.discard(idx)
+        else:
+            ov.add(idx)
+        self._msg_override[fid] = ov
+        self._norm_override(fid)
+        self._update_folder_row(fid)
+        self._update_loaded_msgs(fid)
+
+    def _select_all(self, val: bool) -> None:
+        for fid in self._nodes:
+            self._folder_state[fid] = val
+            self._msg_override.pop(fid, None)
+            self._update_folder_row(fid)
+            self._update_loaded_msgs(fid)
+
+    def _on_tree_click(self, event) -> None:
+        # Acma/kapama ucgenine tiklandiysa varsayilan davranisi birak.
+        elem = self.tree.identify_element(event.x, event.y)
+        if "indicator" in (elem or ""):
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        if iid.startswith("F:"):
+            fid = iid[2:]
+            self._set_folder_checked(fid, not self._folder_state.get(fid, True))
+        elif iid.startswith("M:"):
+            rest = iid[2:]
+            fid, sidx = rest.rsplit("|", 1)
+            self._toggle_msg(fid, int(sidx))
+
+    def _on_tree_open(self, event) -> None:
+        iid = self.tree.focus()
+        if not iid.startswith("F:"):
+            return
+        fid = iid[2:]
+        if fid in self._loaded:
+            return
+        if not self.tree.exists("D:" + fid):
+            return
+        self.tree.item("D:" + fid, text="  (mesajlar yukleniyor...)")
+        token = self._tree_token
+
+        def work() -> None:
+            try:
+                msgs = core.list_ost_folder_messages(self._current_ost, fid)
+                self._queue.put(("msgs", token, fid, msgs))
+            except Exception as exc:
+                self._queue.put(("msgs_err", token, fid, str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_msgs_loaded(self, fid: str, msgs: list) -> None:
+        if self.tree.exists("D:" + fid):
+            self.tree.delete("D:" + fid)
+        self._msg_data[fid] = {m["index"]: m for m in msgs}
+        for m in msgs:
+            idx = m["index"]
+            miid = "M:%s|%d" % (fid, idx)
+            if self.tree.exists(miid):
+                continue
+            self.tree.insert("F:" + fid, "end", iid=miid,
+                             text=self._msg_text(fid, idx))
+        self._loaded.add(fid)
+
+    def _gather_selection(self) -> dict:
+        """Arayuz durumundan motor icin secim sozlugu uretir."""
+        sel: dict = {}
+        for fid in self._nodes:
+            ov = self._msg_override.get(fid)
+            if ov is not None:
+                if ov:
+                    sel[fid] = set(ov)
+            elif self._folder_state.get(fid):
+                sel[fid] = True
+        return sel
 
     # ------------------------------------------------------------------ #
     # Posta kutularini listeleme
@@ -318,6 +588,19 @@ class App(ttk.Frame):
 
         src = os.path.normpath(src)
         out_dir = os.path.normpath(out_dir)
+
+        # Secim: agac yuklendiyse oradan; yoksa None (tum dosya).
+        selection = None
+        if self._nodes:
+            selection = self._gather_selection()
+            if not selection:
+                messagebox.showwarning(
+                    APP_TITLE,
+                    "Hic klasor/mesaj secilmedi.\nAktarmak istediginiz ogeleri "
+                    "isaretleyin veya 'Tumunu sec' butonunu kullanin.",
+                )
+                return
+
         base = _safe_name(os.path.splitext(os.path.basename(src))[0], "donusum")
         fmt = self.var_fmt.get()
         if fmt == "pst":
@@ -330,6 +613,7 @@ class App(ttk.Frame):
             dst = _unique_path(os.path.join(out_dir, base + "_eml"))
             fn = core.file_to_eml
 
+        fn = functools.partial(fn, selection=selection)
         self._log(f"Cikti: {dst}")
         self._start(fn, src, dst)
 
@@ -383,6 +667,23 @@ class App(ttk.Frame):
                         self.progress.configure(mode="determinate")
                         self.progress["value"] = frac
                     self.var_status.set(msg)
+                elif kind == "tree":
+                    _, token, nodes = item
+                    if token == self._tree_token:
+                        self._populate_tree(nodes)
+                elif kind == "tree_err":
+                    _, token, msg = item
+                    if token == self._tree_token:
+                        self.var_tree_info.set("Icerik okunamadi: " + msg)
+                elif kind == "msgs":
+                    _, token, fid, msgs = item
+                    if token == self._tree_token:
+                        self._on_msgs_loaded(fid, msgs)
+                elif kind == "msgs_err":
+                    _, token, fid, msg = item
+                    if token == self._tree_token and self.tree.exists("D:" + fid):
+                        self.tree.item("D:" + fid,
+                                       text="  (mesajlar okunamadi: %s)" % msg)
                 elif kind == "done":
                     self._on_done(item[1])
                 elif kind == "error":
@@ -432,8 +733,8 @@ class App(ttk.Frame):
 def main() -> None:
     root = tk.Tk()
     root.title(APP_TITLE)
-    root.geometry("780x660")
-    root.minsize(680, 580)
+    root.geometry("820x760")
+    root.minsize(720, 620)
     App(root)
     root.mainloop()
 

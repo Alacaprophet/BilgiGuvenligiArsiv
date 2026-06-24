@@ -25,6 +25,10 @@ import os
 import sys
 from typing import Callable, List, Optional
 
+#: engine_libpff'in her klasor dizinine yazdigi, klasorun GERCEK adini tutan
+#: yan dosya. Aktarimda Outlook klasoru bu adla olusturulur (birebir yapi).
+FOLDERNAME_FILE = "__foldername__.txt"
+
 
 def _with_com(fn):
     """COM cagrilarini bir is parcaciginda guvenli kilar.
@@ -306,8 +310,6 @@ def import_eml_tree_to_pst(
     # ~200 ilerleme guncellemesi -> akici arayuz, az COM/kuyruk yuku.
     step = max(25, total // 200)
 
-    folder_cache = {}
-
     def get_or_create(parent, name: str):
         for i in range(1, parent.Folders.Count + 1):
             try:
@@ -317,27 +319,41 @@ def import_eml_tree_to_pst(
                 continue
         return parent.Folders.Add(name)
 
-    def folder_for(rel: str):
-        """rel yolu icin (onbellekli) hedef klasoru dondurur."""
-        if not rel or rel == ".":
-            return dest_root
-        if rel in folder_cache:
-            return folder_cache[rel]
-        folder = dest_root
-        for part in rel.split(os.sep):
-            folder = get_or_create(folder, part)
-        folder_cache[rel] = folder
-        return folder
+    def display_name_for(current_dir: str, fallback: str) -> str:
+        """Klasorun GERCEK adini yan dosyadan okur; yoksa dizin adina duser."""
+        side = os.path.join(current_dir, FOLDERNAME_FILE)
+        try:
+            if os.path.exists(side):
+                with open(side, "r", encoding="utf-8") as fh:
+                    name = fh.read().strip()
+                    if name:
+                        return name
+        except Exception:
+            pass
+        return fallback
+
+    # rel-dizin yolu -> Outlook klasoru. os.walk YUKARIDAN-asagiya gezdigi icin
+    # bir dizine gelindiginde ebeveyni daima onbellekte hazirdir.
+    folder_cache = {".": dest_root}
 
     for current_dir, _dirs, files in os.walk(eml_root):
         rel = os.path.relpath(current_dir, eml_root)
-        try:
-            folder = folder_for(rel)
-        except Exception as exc:
-            report(f"  ! Klasor olusturulamadi ({rel}): {exc}")
-            continue
+        if rel == ".":
+            folder = dest_root
+        else:
+            parent_rel = os.path.dirname(rel) or "."
+            parent_folder = folder_cache.get(parent_rel, dest_root)
+            name = display_name_for(current_dir, os.path.basename(current_dir))
+            try:
+                folder = get_or_create(parent_folder, name)
+            except Exception as exc:
+                report(f"  ! Klasor olusturulamadi ({name}): {exc}")
+                folder = dest_root
+            folder_cache[rel] = folder
 
         for fname in files:
+            if fname == FOLDERNAME_FILE:
+                continue
             if not fname.lower().endswith(".eml"):
                 continue
             full = os.path.join(current_dir, fname)

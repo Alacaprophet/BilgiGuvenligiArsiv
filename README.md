@@ -17,12 +17,21 @@ Program iki sekme sunar.
 Diskteki bir `.ost` dosyasini **elle secersiniz** — dosyanin bir Outlook
 profiline bagli olmasi gerekmez (eski yedekler, orphan dosyalar dahil).
 
-1. **Dosya sec...** ile kaynak `.ost` dosyasini secin.
-2. **Cikti bicimi** secin: PST (Outlook gerekli) / EML klasoru / MBOX.
-3. **Klasor sec...** ile yalnizca bir **hedef klasor** secin.
-4. **Donustur**. Cikti dosyasi, kaynak OST adina gore **bu klasorde otomatik
+1. **Dosya sec...** ile kaynak `.ost` dosyasini secin. Dosyanin **klasor/mesaj
+   agaci hemen ekranda gosterilir**.
+2. Agacta, aktarmak istediginiz **klasorleri** isaretleyin. Bir klasoru acarak
+   icindeki **mesajlari tek tek** de secebilirsiniz. (Varsayilan: hepsi secili;
+   `Tumunu sec` / `Temizle` butonlari da vardir.)
+3. **Cikti bicimi** secin: PST (Outlook gerekli) / EML klasoru / MBOX.
+4. **Klasor sec...** ile yalnizca bir **hedef klasor** secin.
+5. **Donustur**. Cikti dosyasi, kaynak OST adina gore **bu klasorde otomatik
    olusturulur** (orn. `Outlook.ost` → `Outlook.pst`). Ayni ada sahip dosya
    varsa sonuna sayi eklenir.
+
+> Olusan PST, OST'deki **klasor yapisini birebir korur**: klasor adlari aynen
+> tasinir, kok sarmalayici klasorler ("Top of Personal Folders" vb.)
+> duzlestirilir; Outlook'ta veri dosyasi olarak acildiginda icerik OST'deki gibi
+> gorunur. Mesajlara tarih ve baslik bilgileri de eklenir.
 
 > PST cikti icin Outlook gerekir (dosya libpff ile okunur, gercek PST Outlook
 > ile uretilir). Outlook yoksa **EML klasoru** veya **MBOX** secerek icerigi
