@@ -140,7 +140,13 @@ def _read_folder(pff_folder) -> Folder:
 
 
 def read_ost(path: str) -> Folder:
-    """OST/PST dosyasini okuyup klasor agacini dondurur."""
+    """OST/PST dosyasini okuyup klasor agacini dondurur.
+
+    Dosya, libpff'e dogrudan YOL ile degil, Python'un actigi bir dosya
+    tutamaci (file object) ile verilir. Boylece Windows'ta Turkce / Unicode
+    karakter iceren yollardaki (orn. "Outlook Dosyalari") acma sorunu asilir;
+    yolu Python cozdugu icin libpff'in bozuk yol uretmesi engellenir.
+    """
     if not is_available():
         raise RuntimeError("libpff (pypff) bulunamadi. 'pip install libpff-python'")
     import pypff
@@ -148,15 +154,43 @@ def read_ost(path: str) -> Folder:
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
+    name = os.path.splitext(os.path.basename(path))[0]
     pff = pypff.file()
-    pff.open(path)
+    file_obj = None
     try:
+        # Tercih edilen yol: Python dosya tutamaci ile ac (Unicode-guvenli).
+        try:
+            file_obj = open(path, "rb")
+            pff.open_file_object(file_obj)
+        except Exception:
+            # Bazi pypff surumlerinde dogrudan yol ile acma daha iyi olabilir.
+            try:
+                pff.close()
+            except Exception:
+                pass
+            if file_obj is not None:
+                try:
+                    file_obj.close()
+                except Exception:
+                    pass
+                file_obj = None
+            pff = pypff.file()
+            pff.open(path)
+
         root = pff.get_root_folder()
         tree = _read_folder(root)
-        tree.name = os.path.splitext(os.path.basename(path))[0]
+        tree.name = name
         return tree
     finally:
-        pff.close()
+        try:
+            pff.close()
+        except Exception:
+            pass
+        if file_obj is not None:
+            try:
+                file_obj.close()
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------- #
