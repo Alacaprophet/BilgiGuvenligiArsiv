@@ -21,6 +21,29 @@ class ConversionError(Exception):
     """Donusum sirasinda olusan, kullaniciya gosterilebilir hata."""
 
 
+_LOCK_HINTS = (
+    "kilitled", "permission denied", "another process", "erisemiyor",
+    "being used by another", "sharing violation", "kullaniliyor",
+)
+
+
+def _friendly_error(text: str) -> str:
+    """Teknik libpff hatasini kullaniciya anlasilir hale getirir."""
+    low = text.lower()
+    if any(h in low for h in _LOCK_HINTS):
+        return (
+            "OST dosyasi su anda Outlook tarafindan kullaniliyor (kilitli) "
+            "oldugundan dogrudan okunamadi.\n\n"
+            "Iki cozumden birini deneyin:\n\n"
+            "  1) Outlook'u TAMAMEN kapatin (Gorev Yoneticisi'nde OUTLOOK.EXE "
+            "kalmadigindan emin olun), sonra bu islemi yeniden calistirin.\n\n"
+            "  2) 'Posta Kutusu -> PST' sekmesini kullanin: Outlook acikken bile "
+            "calisir, cunku verinizi Outlook'un kendisi okuyup PST'ye yazar "
+            "(dosya kilidi sorunu olmaz). Onerilen yol budur."
+        )
+    return text
+
+
 def available_engines() -> Dict[str, bool]:
     """Hangi motorlarin kullanilabilir oldugunu dondurur."""
     return {
@@ -89,7 +112,7 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None) -> str:
     except ConversionError:
         raise
     except Exception as exc:
-        raise ConversionError(str(exc)) from exc
+        raise ConversionError(_friendly_error(str(exc))) from exc
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -103,7 +126,7 @@ def file_to_eml(ost_path: str, out_dir: str, progress: Progress = None) -> str:
     try:
         return engine_libpff.export_eml_tree(ost_path, out_dir, progress)
     except Exception as exc:
-        raise ConversionError(str(exc)) from exc
+        raise ConversionError(_friendly_error(str(exc))) from exc
 
 
 def file_to_mbox(ost_path: str, mbox_path: str, progress: Progress = None) -> str:
@@ -112,7 +135,7 @@ def file_to_mbox(ost_path: str, mbox_path: str, progress: Progress = None) -> st
     try:
         return engine_libpff.export_mbox(ost_path, mbox_path, progress)
     except Exception as exc:
-        raise ConversionError(str(exc)) from exc
+        raise ConversionError(_friendly_error(str(exc))) from exc
 
 
 # Geriye donuk uyumluluk icin ince bir sinif sarmalayicisi.
