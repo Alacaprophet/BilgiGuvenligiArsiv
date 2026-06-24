@@ -1,0 +1,65 @@
+name: Windows EXE olustur
+
+# Windows uzerinde tek dosyalik (.exe) bir surum derler ve hem "artifact"
+# olarak hem de bir Release ekentisi olarak yayinlar. Python kurulumuna gerek
+# kalmadan dogrudan calisir.
+
+on:
+  workflow_dispatch:        # Elle tetiklenebilir (Actions sekmesi)
+  push:
+    branches:
+      - claude/outlook-ost-pst-converter-df8p0b
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Depoyu al
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bagimliliklari yukle
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pywin32
+          # libpff wheel'i her zaman bulunmayabilir; yoksa derlemeyi durdurma.
+          pip install libpff-python || echo "libpff-python wheel bulunamadi, atlaniyor (OST dosya okuma sinirli olur)."
+
+      - name: EXE derle
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --windowed \
+            --name "OST-PST-Donusturucu" \
+            --hidden-import win32com \
+            --hidden-import win32com.client \
+            --hidden-import win32timezone \
+            --hidden-import pythoncom \
+            --hidden-import pywintypes \
+            --hidden-import pypff \
+            --collect-submodules win32com \
+            run.py
+
+      - name: Artifact yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: OST-PST-Donusturucu-windows
+          path: dist/OST-PST-Donusturucu.exe
+          if-no-files-found: error
+
+      - name: Release yayinla
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: windows-build
+          name: "OST -> PST Donusturucu (Windows EXE)"
+          body: |
+            Python kurmadan dogrudan calisan Windows surumu.
+            Asagidaki **OST-PST-Donusturucu.exe** dosyasini indirip cift tiklayin.
+          files: dist/OST-PST-Donusturucu.exe
