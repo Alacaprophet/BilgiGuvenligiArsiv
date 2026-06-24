@@ -167,7 +167,43 @@ def _prepare_pst_path(pst_path: str) -> str:
     return pst_path
 
 
-def _create_pst_store(ns, pst_path: str):
+def _remove_ghost_pst_stores(ns, report=None) -> int:
+    """Dosyasi diskte bulunmayan (hayalet) PST store'larini profilden cikarir.
+
+    Bunlar onceki basarisiz/yarim kalan denemelerden Outlook profiline takili
+    kalan girislerdir; Outlook acilista veya AddStoreEx sirasinda bunlar icin
+    'dosya bulunamiyor' uyarisi verip islemi kilitler. Temizleyince akis acilir.
+    """
+    removed = 0
+    try:
+        count = ns.Stores.Count
+    except Exception:
+        return 0
+    # Geriye dogru gez: store cikarilinca sonraki indeksler kayar.
+    for i in range(count, 0, -1):
+        try:
+            st = ns.Stores.Item(i)
+            fp = st.FilePath or ""
+        except Exception:
+            continue
+        if not fp.lower().endswith(".pst"):
+            continue
+        try:
+            if os.path.exists(fp):
+                continue  # gecerli PST; dokunma
+        except Exception:
+            continue
+        try:
+            ns.RemoveStore(st.GetRootFolder())
+            removed += 1
+        except Exception:
+            pass
+    if removed and report:
+        report(f"Onceki denemelerden kalan {removed} eksik PST kaydi temizlendi.")
+    return removed
+
+
+def _create_pst_store(ns, pst_path: str, report=None):
     """Yeni bir Unicode PST store olusturup dondurur.
 
     Outlook bazen (kurumsal politika veya yol kisitlari yuzunden) PST'yi
@@ -177,6 +213,10 @@ def _create_pst_store(ns, pst_path: str):
 
     Donus: (dest_store, gercek_pst_yolu)
     """
+    # Onceki denemelerden kalan hayalet PST kayitlarini temizle; aksi halde
+    # Outlook 'dosya bulunamiyor' uyarisi verip AddStoreEx'i kilitleyebilir.
+    _remove_ghost_pst_stores(ns, report)
+
     before = set()
     for i in range(1, ns.Stores.Count + 1):
         try:
@@ -184,7 +224,16 @@ def _create_pst_store(ns, pst_path: str):
         except Exception:
             continue
 
-    ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
+    try:
+        ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
+    except Exception as exc:
+        raise RuntimeError(
+            "PST dosyasi olusturulamadi: %s\n\n"
+            "Bu genellikle kurumsal bir guvenlik politikasinin (Group Policy) "
+            "yeni PST olusturmayi/eklemeyi engellemesinden kaynaklanir.\n"
+            "Cozum: 'Cikti bicimi' olarak EML klasoru veya MBOX secin "
+            "(Outlook gerektirmez, ayni icerigi kurtarir)." % exc
+        ) from exc
 
     dest_store = None
     # Once tam yol eslesmesini dene (istenen konuma olusturulduysa).
@@ -209,9 +258,11 @@ def _create_pst_store(ns, pst_path: str):
                 continue
     if dest_store is None:
         raise RuntimeError(
-            "PST dosyasi olusturulamadi: Outlook yeni veri dosyasini ekleyemedi. "
-            "Outlook'un acik ve calisir durumda oldugundan emin olun; kurumsal "
-            "guvenlik politikasi yeni PST olusturmayi engelliyor olabilir."
+            "PST dosyasi olusturulamadi: Outlook yeni veri dosyasini eklemedi.\n\n"
+            "Bu genellikle kurumsal bir guvenlik politikasinin (Group Policy) yeni "
+            "PST olusturmayi engellemesinden kaynaklanir.\n"
+            "Cozum: 'Cikti bicimi' olarak EML klasoru veya MBOX secin "
+            "(Outlook gerektirmez, ayni icerigi kurtarir)."
         )
     try:
         actual = dest_store.FilePath or pst_path
@@ -260,7 +311,7 @@ def convert_store_to_pst(
     source_root = source_store.GetRootFolder()
 
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    dest_store, actual_path = _create_pst_store(ns, pst_path)
+    dest_store, actual_path = _create_pst_store(ns, pst_path, report)
     dest_root = dest_store.GetRootFolder()
     if actual_path and actual_path.lower() != pst_path.lower():
         report(f"Not: PST su konumda olusturuldu: {actual_path}")
@@ -329,7 +380,7 @@ def import_eml_tree_to_pst(
 
     ns = _namespace()
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    dest_store, actual_path = _create_pst_store(ns, pst_path)
+    dest_store, actual_path = _create_pst_store(ns, pst_path, report)
     dest_root = dest_store.GetRootFolder()
 
     total = max(1, _count_eml(eml_root))
@@ -446,7 +497,7 @@ def import_stream_to_pst(
 
     ns = _namespace()
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    dest_store, actual_path = _create_pst_store(ns, pst_path)
+    dest_store, actual_path = _create_pst_store(ns, pst_path, report)
     dest_root = dest_store.GetRootFolder()
     if actual_path and actual_path.lower() != pst_path.lower():
         report(f"Not: PST su konumda olusturuldu: {actual_path}")
