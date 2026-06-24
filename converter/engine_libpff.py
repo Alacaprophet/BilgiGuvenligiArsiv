@@ -221,27 +221,64 @@ def _safe_name(name: str, fallback: str = "oge") -> str:
     return name[:120]
 
 
+#: Govde/MIME ile ilgili basliklar - bunlari KENDIMIZ uretecegimiz icin
+#: orijinal transport_headers'tan kopyalamayiz (aksi halde "set_content not
+#: valid on multipart" hatasi olusur).
+_SKIP_HEADERS = {
+    "content-type",
+    "content-transfer-encoding",
+    "content-disposition",
+    "content-id",
+    "content-description",
+    "content-length",
+    "mime-version",
+}
+
+
 def message_to_eml_bytes(msg: Message) -> bytes:
     """Bir Message nesnesini RFC822 (.eml) baytlarina cevirir."""
-    eml: EmailMessage
+    try:
+        return _build_eml(msg)
+    except Exception:
+        # Hicbir mesaj kaybolmasin: en sade bicimde yeniden kur.
+        try:
+            fallback = EmailMessage()
+            fallback["Subject"] = msg.subject or "(konusuz)"
+            if msg.sender_name:
+                fallback["From"] = msg.sender_name
+            body = msg.plain_body or msg.html_body or " "
+            fallback.set_content(body)
+            return fallback.as_bytes()
+        except Exception:
+            # Son care: ham metin.
+            raw = "Subject: %s\r\n\r\n%s" % (
+                msg.subject or "(konusuz)", msg.plain_body or ""
+            )
+            return raw.encode("utf-8", "replace")
+
+
+def _build_eml(msg: Message) -> bytes:
+    eml = EmailMessage()
 
     if msg.headers.strip():
-        # Orijinal basliklari koru, govdeyi yeniden ekle.
+        # Orijinal aciklayici basliklari (From/To/Subject/Date...) koru;
+        # govde/MIME basliklarini atla (govdeyi biz kuracagiz).
         parsed = Parser(policy=default_policy).parsestr(msg.headers, headersonly=True)
-        eml = EmailMessage()
         for key, value in parsed.items():
+            if key.lower() in _SKIP_HEADERS:
+                continue
             try:
                 eml[key] = value
             except Exception:
                 continue
-    else:
-        eml = EmailMessage()
-        eml["Subject"] = msg.subject
-        if msg.sender_name:
-            eml["From"] = msg.sender_name
 
     if "Subject" not in eml:
-        eml["Subject"] = msg.subject
+        eml["Subject"] = msg.subject or "(konusuz)"
+    if "From" not in eml and msg.sender_name:
+        try:
+            eml["From"] = msg.sender_name
+        except Exception:
+            pass
 
     if msg.html_body:
         eml.set_content(msg.plain_body or " ")
