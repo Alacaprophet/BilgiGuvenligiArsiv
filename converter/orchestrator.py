@@ -95,12 +95,17 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None) -> str:
 
     tmp_dir = tempfile.mkdtemp(prefix="ost2pst_")
     try:
+        report(
+            "Ipucu: Cok sayida e-posta varsa bu islem uzun surebilir. Canli bir "
+            "Outlook hesabi icin 'Posta Kutusu -> PST' sekmesi cok daha hizlidir.",
+            -1.0,
+        )
         report("Asama 1/2: OST okunuyor ve gecici olarak cikariliyor...", -1.0)
 
         def stage1(m: str, f: float) -> None:
             report(m, (f * 0.5) if f >= 0 else f)
 
-        engine_libpff.export_eml_tree(ost_path, tmp_dir, stage1)
+        engine_libpff.export_eml_tree(ost_path, tmp_dir, stage1, short_names=True)
 
         report("Asama 2/2: Outlook ile PST olusturuluyor...", 0.5)
 

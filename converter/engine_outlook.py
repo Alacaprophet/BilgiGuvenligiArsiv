@@ -20,9 +20,37 @@ platformlarda ``is_available()`` False doner ve motor sessizce devre disi kalir.
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
 from typing import Callable, List, Optional
+
+
+def _with_com(fn):
+    """COM cagrilarini bir is parcaciginda guvenli kilar.
+
+    Donusumler arayuzu dondurmamak icin ayri bir is parcaciginda calisir.
+    Outlook COM nesneleri o parcacikta ``CoInitialize`` gerektirir; aksi halde
+    "CoInitialize has not been called" hatasi olusur. Bu sarmalayici her cagri
+    icin COM'u baslatip kapatir (ana parcacikta da zararsizdir).
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            import pythoncom
+        except Exception:
+            return fn(*args, **kwargs)
+        pythoncom.CoInitialize()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+    return wrapper
 
 # OlStoreType sabitleri (Outlook Object Model).
 # Unicode store 2 GB ANSI sinirini ortadan kaldirir -> buyuk posta kutulari icin.
@@ -80,6 +108,7 @@ def _namespace():
     return outlook.GetNamespace("MAPI")
 
 
+@_with_com
 def list_stores() -> List[StoreInfo]:
     """Outlook profilindeki tum store'lari dondurur.
 
@@ -120,6 +149,7 @@ def _count_items(folder) -> int:
     return total
 
 
+@_with_com
 def convert_store_to_pst(
     store_id: str,
     pst_path: str,
@@ -226,6 +256,7 @@ def _count_eml(root_dir: str) -> int:
     return total
 
 
+@_with_com
 def import_eml_tree_to_pst(
     eml_root: str,
     pst_path: str,
@@ -270,37 +301,72 @@ def import_eml_tree_to_pst(
 
     total = max(1, _count_eml(eml_root))
     done = 0
+    fail = 0
+    fail_logged = 0
+    # ~200 ilerleme guncellemesi -> akici arayuz, az COM/kuyruk yuku.
+    step = max(25, total // 200)
+
+    folder_cache = {}
 
     def get_or_create(parent, name: str):
         for i in range(1, parent.Folders.Count + 1):
-            if parent.Folders.Item(i).Name == name:
-                return parent.Folders.Item(i)
+            try:
+                if parent.Folders.Item(i).Name == name:
+                    return parent.Folders.Item(i)
+            except Exception:
+                continue
         return parent.Folders.Add(name)
+
+    def folder_for(rel: str):
+        """rel yolu icin (onbellekli) hedef klasoru dondurur."""
+        if not rel or rel == ".":
+            return dest_root
+        if rel in folder_cache:
+            return folder_cache[rel]
+        folder = dest_root
+        for part in rel.split(os.sep):
+            folder = get_or_create(folder, part)
+        folder_cache[rel] = folder
+        return folder
 
     for current_dir, _dirs, files in os.walk(eml_root):
         rel = os.path.relpath(current_dir, eml_root)
-        folder = dest_root
-        if rel and rel != ".":
-            for part in rel.split(os.sep):
-                folder = get_or_create(folder, part)
+        try:
+            folder = folder_for(rel)
+        except Exception as exc:
+            report(f"  ! Klasor olusturulamadi ({rel}): {exc}")
+            continue
 
         for fname in files:
             if not fname.lower().endswith(".eml"):
                 continue
             full = os.path.join(current_dir, fname)
+            item = None
             try:
                 item = ns.OpenSharedItem(full)
                 item.Move(folder)
             except Exception as exc:  # pragma: no cover - Outlook'a bagli
-                report(f"  ! {fname} aktarilamadi: {exc}")
+                fail += 1
+                if fail_logged < 15:
+                    fail_logged += 1
+                    report(f"  ! {fname} aktarilamadi: {exc}")
+                elif fail_logged == 15:
+                    fail_logged += 1
+                    report("  ! (daha fazla aktarilamayan oge sessizce gecilecek)")
+            finally:
+                item = None
             done += 1
-            if done % 10 == 0 or done == total:
-                report(f"{done}/{total} mesaj PST'ye yazildi", done / total)
+            if done % step == 0 or done == total:
+                report(f"{done}/{total} mesaj PST'ye yazildi", min(1.0, done / total))
 
     report("PST dosyasi kapatiliyor...", 0.99)
     try:
         ns.RemoveStore(dest_root)
     except Exception:
         pass
-    report("Bitti.", 1.0)
+    if fail:
+        report(f"Bitti. {total - fail}/{total} mesaj yazildi, {fail} oge atlandi.",
+               1.0)
+    else:
+        report("Bitti.", 1.0)
     return pst_path

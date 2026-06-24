@@ -316,6 +316,8 @@ class App(ttk.Frame):
             messagebox.showwarning(APP_TITLE, "Gecerli bir hedef klasor secin.")
             return
 
+        src = os.path.normpath(src)
+        out_dir = os.path.normpath(out_dir)
         base = _safe_name(os.path.splitext(os.path.basename(src))[0], "donusum")
         fmt = self.var_fmt.get()
         if fmt == "pst":
@@ -342,6 +344,7 @@ class App(ttk.Frame):
         if not out_dir or not os.path.isdir(out_dir):
             messagebox.showwarning(APP_TITLE, "Gecerli bir hedef klasor secin.")
             return
+        out_dir = os.path.normpath(out_dir)
         store = self._stores[idx]
         base = _safe_name(getattr(store, "name", "posta_kutusu"), "posta_kutusu")
         dst = _unique_path(os.path.join(out_dir, base + ".pst"))
@@ -415,6 +418,13 @@ class App(ttk.Frame):
     def _log(self, text: str) -> None:
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n")
+        # Gunluk kutusunu sinirla: cok uzun gunluk arayuzu yavaslatir.
+        try:
+            line_count = int(self.log.index("end-1c").split(".")[0])
+            if line_count > 600:
+                self.log.delete("1.0", f"{line_count - 600}.0")
+        except Exception:
+            pass
         self.log.see("end")
         self.log.configure(state="disabled")
 

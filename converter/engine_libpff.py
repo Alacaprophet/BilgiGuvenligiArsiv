@@ -139,8 +139,8 @@ def _read_folder(pff_folder) -> Folder:
     return folder
 
 
-def read_ost(path: str) -> Folder:
-    """OST/PST dosyasini okuyup klasor agacini dondurur.
+def _open_pff(path: str):
+    """OST/PST dosyasini acar ve (pff, file_obj) dondurur.
 
     Windows'ta iki ayri sorunu birden asar:
 
@@ -149,10 +149,11 @@ def read_ost(path: str) -> Folder:
       eder; ileri cizgi gorunce surucu harfini kaybedip yolu bozar. Yolu once
       ``os.path.normpath`` ile yerel ayraca (``\\``) ceviririz.
     * **Unicode / Turkce karakter**: Dosyayi once Python'un actigi bir dosya
-      tutamaci (``open_file_object``) ile vermeyi deneriz; bu yol Unicode-guvenli
-      oldugu icin "Outlook Dosyalari" gibi yollar sorunsuz acilir.
+      tutamaci (``open_file_object``) ile vermeyi deneriz; Unicode-guvenlidir.
 
     Iki yontem de denenir; her ikisi de basarisiz olursa ayrintili hata verilir.
+    Cagiran taraf isi bitince ``pff.close()`` ve (varsa) ``file_obj.close()``
+    cagirmalidir.
     """
     if not is_available():
         raise RuntimeError("libpff (pypff) bulunamadi. 'pip install libpff-python'")
@@ -161,10 +162,7 @@ def read_ost(path: str) -> Folder:
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
-    name = os.path.splitext(os.path.basename(path))[0]
-    # Ileri egik cizgileri yerel ayraca cevir (Windows'ta C:/.. -> C:\..).
     native = os.path.normpath(os.fspath(path))
-
     errors = []
 
     # 1) Python dosya tutamaci ile (Unicode & ayrac guvenli) - tercih edilen.
@@ -173,12 +171,9 @@ def read_ost(path: str) -> Folder:
     try:
         file_obj = open(native, "rb")
         pff.open_file_object(file_obj)
-        tree = _read_folder(pff.get_root_folder())
-        tree.name = name
-        return tree
+        return pff, file_obj
     except Exception as exc:
         errors.append("dosya-tutamaci: %s" % exc)
-    finally:
         try:
             pff.close()
         except Exception:
@@ -193,12 +188,9 @@ def read_ost(path: str) -> Folder:
     pff = pypff.file()
     try:
         pff.open(native)
-        tree = _read_folder(pff.get_root_folder())
-        tree.name = name
-        return tree
+        return pff, None
     except Exception as exc:
         errors.append("yol: %s" % exc)
-    finally:
         try:
             pff.close()
         except Exception:
@@ -208,6 +200,57 @@ def read_ost(path: str) -> Folder:
         "OST dosyasi acilamadi.\nYol: %s\nDenemeler:\n  - %s"
         % (native, "\n  - ".join(errors))
     )
+
+
+def _close_pff(pff, file_obj) -> None:
+    try:
+        if pff is not None:
+            pff.close()
+    except Exception:
+        pass
+    if file_obj is not None:
+        try:
+            file_obj.close()
+        except Exception:
+            pass
+
+
+def _folder_name(pff_folder, default: str = "Adsiz") -> str:
+    try:
+        return pff_folder.name or default
+    except Exception:
+        return default
+
+
+def _count_messages(pff_folder) -> int:
+    """Govde okumadan, hizlica toplam mesaj sayisini hesaplar (ilerleme icin)."""
+    total = 0
+    try:
+        total += pff_folder.number_of_sub_messages
+    except Exception:
+        pass
+    try:
+        for i in range(pff_folder.number_of_sub_folders):
+            total += _count_messages(pff_folder.get_sub_folder(i))
+    except Exception:
+        pass
+    return total
+
+
+def read_ost(path: str) -> Folder:
+    """OST/PST dosyasini okuyup klasor agacini (bellege) dondurur.
+
+    Not: Buyuk posta kutularinda bellek tuketir; toplu disa aktarim icin
+    bunun yerine ``export_eml_tree`` / ``export_mbox`` akis (streaming)
+    fonksiyonlarini kullanin.
+    """
+    pff, file_obj = _open_pff(path)
+    try:
+        tree = _read_folder(pff.get_root_folder())
+        tree.name = os.path.splitext(os.path.basename(path))[0]
+        return tree
+    finally:
+        _close_pff(pff, file_obj)
 
 
 # --------------------------------------------------------------------------- #
@@ -300,48 +343,111 @@ def _build_eml(msg: Message) -> bytes:
     return eml.as_bytes()
 
 
+class _Progress:
+    """Ilerleme/hata raporlamayi kisar: arayuzu binlerce satirla bogmaz."""
+
+    def __init__(self, total, callback, verb="aktarildi", max_fail_logs=15):
+        self.total = max(1, total)
+        self.cb = callback
+        self.verb = verb
+        self.done = 0
+        self.fail = 0
+        self._fail_logged = 0
+        self._max_fail_logs = max_fail_logs
+        # En fazla ~200 ilerleme guncellemesi -> akici ama tasmayan arayuz.
+        self.step = max(50, self.total // 200)
+
+    def _emit(self, msg, frac=-1.0):
+        if self.cb:
+            self.cb(msg, frac)
+
+    def tick(self):
+        self.done += 1
+        if self.done % self.step == 0 or self.done >= self.total:
+            self._emit("%d/%d mesaj %s" % (self.done, self.total, self.verb),
+                       min(1.0, self.done / self.total))
+
+    def failure(self, label, exc):
+        self.fail += 1
+        if self._fail_logged < self._max_fail_logs:
+            self._fail_logged += 1
+            self._emit("  ! Atlandi: %s (%s)" % (label, exc))
+        elif self._fail_logged == self._max_fail_logs:
+            self._fail_logged += 1
+            self._emit("  ! (daha fazla atlanan oge sessizce gecilecek)")
+
+    def finish(self):
+        if self.fail:
+            self._emit("Tamamlandi. %d/%d oge yazildi, %d oge atlandi."
+                       % (self.done - self.fail, self.done, self.fail), 1.0)
+        else:
+            self._emit("Bitti. %d mesaj." % self.done, 1.0)
+
+
 def export_eml_tree(
     path: str,
     out_dir: str,
     progress: Optional[Callable[[str, float], None]] = None,
+    short_names: bool = False,
 ) -> str:
     """OST'yi klasor yapisini koruyarak .eml dosyalari halinde disa aktarir.
 
-    Returns: cikti kok dizini.
+    Akis (streaming) yontemiyle calisir: tum posta kutusunu bellege almak
+    yerine her mesaji okuyup hemen yazar -> dusuk bellek, yuksek hiz.
+
+    short_names=True ise dosyalar 00001.eml gibi kisa adlarla yazilir
+    (PST'ye aktarim ardisinda Windows MAX_PATH sorununu ve gereksiz isi onler).
     """
-    tree = read_ost(path)
-    os.makedirs(out_dir, exist_ok=True)
+    if progress:
+        progress("OST aciliyor...", 0.0)
+    pff, file_obj = _open_pff(path)
+    try:
+        root = pff.get_root_folder()
+        prog = _Progress(_count_messages(root), progress, verb="aktarildi")
+        os.makedirs(out_dir, exist_ok=True)
 
-    total = max(1, tree.total_messages())
-    done = 0
-
-    def report(m: str, f: float = -1.0) -> None:
-        if progress:
-            progress(m, f)
-
-    def walk(folder: Folder, rel: str) -> None:
-        nonlocal done
-        dest = os.path.join(out_dir, rel) if rel else out_dir
-        os.makedirs(dest, exist_ok=True)
-        for i, msg in enumerate(folder.messages, start=1):
-            fname = _safe_name(f"{i:05d}_{msg.subject}", f"{i:05d}_mesaj") + ".eml"
+        def walk(folder, rel: str) -> None:
+            dest = os.path.join(out_dir, rel) if rel else out_dir
             try:
-                with open(os.path.join(dest, fname), "wb") as fh:
-                    fh.write(message_to_eml_bytes(msg))
-            except Exception as exc:
-                report(f"  ! Yazilamadi: {fname} ({exc})")
-            done += 1
-            if done % 25 == 0 or done == total:
-                report(f"{done}/{total} mesaj aktarildi", done / total)
-        for sub in folder.subfolders:
-            walk(sub, os.path.join(rel, _safe_name(sub.name, "klasor")))
+                os.makedirs(dest, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                n_msg = folder.number_of_sub_messages
+            except Exception:
+                n_msg = 0
+            for i in range(n_msg):
+                label = "oge %d" % (i + 1)
+                try:
+                    msg = _read_message(folder.get_sub_message(i))
+                    if short_names:
+                        fname = "%05d.eml" % (i + 1)
+                    else:
+                        label = msg.subject
+                        fname = _safe_name("%05d_%s" % (i + 1, msg.subject),
+                                           "%05d_mesaj" % (i + 1)) + ".eml"
+                    with open(os.path.join(dest, fname), "wb") as fh:
+                        fh.write(message_to_eml_bytes(msg))
+                except Exception as exc:
+                    prog.failure(label, exc)
+                prog.tick()
+            try:
+                n_sub = folder.number_of_sub_folders
+            except Exception:
+                n_sub = 0
+            for j in range(n_sub):
+                try:
+                    sub = folder.get_sub_folder(j)
+                except Exception:
+                    continue
+                sname = _safe_name(_folder_name(sub), "klasor")[:60]
+                walk(sub, os.path.join(rel, sname) if rel else sname)
 
-    report("OST okunuyor...", 0.0)
-    # Kok klasorun mesajlari out_dir'e, alt klasorler adlandirilmis alt
-    # dizinlere yazilir (kok klasor adini tekrar etmeden).
-    walk(tree, "")
-    report("Bitti.", 1.0)
-    return out_dir
+        walk(root, "")
+        prog.finish()
+        return out_dir
+    finally:
+        _close_pff(pff, file_obj)
 
 
 def export_mbox(
@@ -349,38 +455,51 @@ def export_mbox(
     mbox_path: str,
     progress: Optional[Callable[[str, float], None]] = None,
 ) -> str:
-    """Tum mesajlari tek bir MBOX dosyasina yazar."""
+    """Tum mesajlari tek bir MBOX dosyasina yazar (akis yontemiyle)."""
     import mailbox
 
-    tree = read_ost(path)
-    total = max(1, tree.total_messages())
-    done = 0
-
-    def report(m: str, f: float = -1.0) -> None:
-        if progress:
-            progress(m, f)
-
+    if progress:
+        progress("OST aciliyor...", 0.0)
+    pff, file_obj = _open_pff(path)
     mbox = mailbox.mbox(mbox_path)
-    mbox.lock()
     try:
-        def walk(folder: Folder) -> None:
-            nonlocal done
-            for msg in folder.messages:
-                try:
-                    mbox.add(message_to_eml_bytes(msg))
-                except Exception:
-                    pass
-                done += 1
-                if done % 25 == 0 or done == total:
-                    report(f"{done}/{total} mesaj yazildi", done / total)
-            for sub in folder.subfolders:
-                walk(sub)
+        mbox.lock()
+        root = pff.get_root_folder()
+        prog = _Progress(_count_messages(root), progress, verb="yazildi")
 
-        report("OST okunuyor...", 0.0)
-        walk(tree)
+        def walk(folder) -> None:
+            try:
+                n_msg = folder.number_of_sub_messages
+            except Exception:
+                n_msg = 0
+            for i in range(n_msg):
+                try:
+                    msg = _read_message(folder.get_sub_message(i))
+                    mbox.add(message_to_eml_bytes(msg))
+                except Exception as exc:
+                    prog.failure("oge %d" % (i + 1), exc)
+                prog.tick()
+            try:
+                n_sub = folder.number_of_sub_folders
+            except Exception:
+                n_sub = 0
+            for j in range(n_sub):
+                try:
+                    walk(folder.get_sub_folder(j))
+                except Exception:
+                    continue
+
+        walk(root)
         mbox.flush()
+        prog.finish()
+        return mbox_path
     finally:
-        mbox.unlock()
-        mbox.close()
-    report("Bitti.", 1.0)
-    return mbox_path
+        try:
+            mbox.unlock()
+        except Exception:
+            pass
+        try:
+            mbox.close()
+        except Exception:
+            pass
+        _close_pff(pff, file_obj)
