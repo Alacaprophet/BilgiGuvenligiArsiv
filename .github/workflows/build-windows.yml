@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - claude/outlook-ost-pst-converter-df8p0b
+      - claude/wonderful-ramanujan-byn1f9
 
 permissions:
   contents: write
