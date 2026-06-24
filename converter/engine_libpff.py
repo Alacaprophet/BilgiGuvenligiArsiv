@@ -142,10 +142,17 @@ def _read_folder(pff_folder) -> Folder:
 def read_ost(path: str) -> Folder:
     """OST/PST dosyasini okuyup klasor agacini dondurur.
 
-    Dosya, libpff'e dogrudan YOL ile degil, Python'un actigi bir dosya
-    tutamaci (file object) ile verilir. Boylece Windows'ta Turkce / Unicode
-    karakter iceren yollardaki (orn. "Outlook Dosyalari") acma sorunu asilir;
-    yolu Python cozdugu icin libpff'in bozuk yol uretmesi engellenir.
+    Windows'ta iki ayri sorunu birden asar:
+
+    * **Ileri egik cizgi**: tkinter yollari ``C:/Users/...`` biciminde verir.
+      libpff, ``\\\\?\\`` uzun-yol bicimini yalnizca TERS egik cizgi ile kabul
+      eder; ileri cizgi gorunce surucu harfini kaybedip yolu bozar. Yolu once
+      ``os.path.normpath`` ile yerel ayraca (``\\``) ceviririz.
+    * **Unicode / Turkce karakter**: Dosyayi once Python'un actigi bir dosya
+      tutamaci (``open_file_object``) ile vermeyi deneriz; bu yol Unicode-guvenli
+      oldugu icin "Outlook Dosyalari" gibi yollar sorunsuz acilir.
+
+    Iki yontem de denenir; her ikisi de basarisiz olursa ayrintili hata verilir.
     """
     if not is_available():
         raise RuntimeError("libpff (pypff) bulunamadi. 'pip install libpff-python'")
@@ -155,32 +162,22 @@ def read_ost(path: str) -> Folder:
         raise FileNotFoundError(path)
 
     name = os.path.splitext(os.path.basename(path))[0]
-    pff = pypff.file()
-    file_obj = None
-    try:
-        # Tercih edilen yol: Python dosya tutamaci ile ac (Unicode-guvenli).
-        try:
-            file_obj = open(path, "rb")
-            pff.open_file_object(file_obj)
-        except Exception:
-            # Bazi pypff surumlerinde dogrudan yol ile acma daha iyi olabilir.
-            try:
-                pff.close()
-            except Exception:
-                pass
-            if file_obj is not None:
-                try:
-                    file_obj.close()
-                except Exception:
-                    pass
-                file_obj = None
-            pff = pypff.file()
-            pff.open(path)
+    # Ileri egik cizgileri yerel ayraca cevir (Windows'ta C:/.. -> C:\..).
+    native = os.path.normpath(os.fspath(path))
 
-        root = pff.get_root_folder()
-        tree = _read_folder(root)
+    errors = []
+
+    # 1) Python dosya tutamaci ile (Unicode & ayrac guvenli) - tercih edilen.
+    file_obj = None
+    pff = pypff.file()
+    try:
+        file_obj = open(native, "rb")
+        pff.open_file_object(file_obj)
+        tree = _read_folder(pff.get_root_folder())
         tree.name = name
         return tree
+    except Exception as exc:
+        errors.append("dosya-tutamaci: %s" % exc)
     finally:
         try:
             pff.close()
@@ -191,6 +188,26 @@ def read_ost(path: str) -> Folder:
                 file_obj.close()
             except Exception:
                 pass
+
+    # 2) Yerel (ters egik cizgili) yol ile dogrudan ac.
+    pff = pypff.file()
+    try:
+        pff.open(native)
+        tree = _read_folder(pff.get_root_folder())
+        tree.name = name
+        return tree
+    except Exception as exc:
+        errors.append("yol: %s" % exc)
+    finally:
+        try:
+            pff.close()
+        except Exception:
+            pass
+
+    raise RuntimeError(
+        "OST dosyasi acilamadi.\nYol: %s\nDenemeler:\n  - %s"
+        % (native, "\n  - ".join(errors))
+    )
 
 
 # --------------------------------------------------------------------------- #
