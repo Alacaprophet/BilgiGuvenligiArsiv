@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# Cikti / gecici donusum dosyalari
+*.pst
+*.ost
+*.mbox
+ost2pst_*/

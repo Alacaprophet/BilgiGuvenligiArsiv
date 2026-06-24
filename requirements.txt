@@ -1,0 +1,11 @@
+# OST -> PST Donusturucu bagimliliklari
+#
+# Tkinter Python ile birlikte gelir; ek kurulum gerektirmez.
+# Asagidaki paketler OPSIYONELDIR ancak tam islevsellik icin onerilir.
+
+# Windows + Outlook ile GERCEK PST uretimi (COM/MAPI) icin:
+pywin32 ; sys_platform == "win32"
+
+# Diskteki .ost dosyalarini dogrudan okumak (orphan dosyalar dahil) icin:
+# Windows'ta onceden derlenmis bir wheel gerekebilir.
+libpff-python
