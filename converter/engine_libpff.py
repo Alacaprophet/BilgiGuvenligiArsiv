@@ -287,14 +287,16 @@ def _node_list(root) -> List[dict]:
             spath = path + (i,)
             sid = "/".join(str(p) for p in spath)
             name = _folder_name(sub)
-            if _is_container(name):
-                # Sarmalayici: dugum olusturma, cocuklari ust seviyeye tasi.
-                rec(sub, spath, parent_id)
-                continue
             try:
                 count = sub.number_of_sub_messages
             except Exception:
                 count = 0
+            # Sarmalayici VEYA mesaji olmayan klasor: dugum olusturma; varsa
+            # mail iceren alt klasorleri bir ust seviyeye tasi. Boylece arayuzde
+            # ve PST'de yalnizca mail iceren klasorler gorunur/aktarilir.
+            if _is_container(name) or count == 0:
+                rec(sub, spath, parent_id)
+                continue
             nodes.append({"id": sid, "parent": parent_id, "name": name,
                           "count": int(count)})
             rec(sub, spath, sid)
@@ -305,6 +307,9 @@ def _node_list(root) -> List[dict]:
 
 def build_tree(path: str) -> List[dict]:
     """OST'nin klasor agacini (govde okumadan) hizlica cikarir.
+
+    Yalnizca MESAJ ICEREN klasorler dondurulur; bos klasorler gizlenir ve mail
+    iceren alt klasorleri en yakin mail iceren ust seviyeye tasinir.
 
     Donus: ``_node_list`` bicimi dugum listesi (DFS on-sira).
     """
@@ -565,6 +570,85 @@ def _selected_indices(folder, sel: Union[bool, Set[int]]) -> List[int]:
     if sel is True:
         return list(range(n_msg))
     return sorted(i for i in sel if 0 <= i < n_msg)
+
+
+def _name_chains(nodes: List[dict]) -> Dict[str, Tuple[str, ...]]:
+    """Her dugum id'si icin kok->klasor GERCEK ad demetini hesaplar."""
+    byid = {n["id"]: n for n in nodes}
+    chains: Dict[str, Tuple[str, ...]] = {}
+    for n in nodes:
+        seq: List[str] = []
+        cur: Optional[dict] = n
+        while cur is not None:
+            seq.append(cur["name"])
+            parent = cur["parent"]
+            cur = byid.get(parent) if parent else None
+        chains[n["id"]] = tuple(reversed(seq))
+    return chains
+
+
+def count_selected(path: str, selection: Optional[Selection] = None) -> int:
+    """Secimdeki toplam mesaj sayisini (govde okumadan) hizlica hesaplar."""
+    nodes = build_tree(path)
+    byid = {n["id"]: n for n in nodes}
+    if selection is None:
+        selection = _full_selection(nodes)
+    total = 0
+    for fid, sel in selection.items():
+        if fid not in byid:
+            continue
+        total += byid[fid]["count"] if sel is True else len(sel)
+    return total
+
+
+def stream_selected_eml(
+    path: str,
+    selection: Optional[Selection],
+    sink: Callable[[Tuple[Optional[Tuple[str, ...]], Optional[str]]], None],
+    tmp_dir: str,
+) -> None:
+    """Secilen mesajlari okuyup tmp_dir'e .eml yazar ve ``sink`` ile yayinlar.
+
+    Boru hatti (pipeline) uretici tarafidir: her mesaj icin
+    ``sink((name_chain, eml_path))`` cagrilir. ``name_chain`` kok->klasor gercek
+    ad demeti, ``eml_path`` yazilan gecici .eml dosyasidir. Okunamayan mesaj icin
+    ``sink((name_chain, None))`` gonderilir (tuketici onu sayar, atlar) -> ilerleme
+    cubugu yine de %100'e ulasir.
+
+    Bu fonksiyon yalnizca pypff (C) kullanir; COM cagirmaz, bu yuzden ayri bir
+    is parcaciginda Outlook tuketicisiyle eszamanli guvenle calisir.
+    """
+    pff, file_obj = _open_pff(path)
+    try:
+        root = pff.get_root_folder()
+        nodes = _node_list(root)
+        if selection is None:
+            selection = _full_selection(nodes)
+        byid = {n["id"]: n for n in nodes}
+        chains = _name_chains(nodes)
+
+        counter = 0
+        for fid, sel in selection.items():
+            if fid not in byid:
+                continue
+            try:
+                folder = _folder_by_id(root, fid)
+            except Exception:
+                continue
+            chain = chains.get(fid, (byid[fid]["name"],))
+            for i in _selected_indices(folder, sel):
+                counter += 1
+                eml_path = os.path.join(tmp_dir, "%08d.eml" % counter)
+                try:
+                    msg = _read_message(folder.get_sub_message(i))
+                    with open(eml_path, "wb") as fh:
+                        fh.write(message_to_eml_bytes(msg))
+                except Exception:
+                    sink((chain, None))  # okunamadi: tuketici sayar, atlar
+                    continue
+                sink((chain, eml_path))
+    finally:
+        _close_pff(pff, file_obj)
 
 
 def export_selected_eml(

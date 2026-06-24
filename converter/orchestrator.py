@@ -8,8 +8,10 @@ karar verir. Tum fonksiyonlar ``progress(mesaj, oran)`` geri cagrimi alir
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import tempfile
+import threading
 from typing import Callable, Dict, List, Optional
 
 from . import engine_libpff, engine_outlook
@@ -120,28 +122,51 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
         if progress:
             progress(m, f)
 
+    # Toplam mesaj sayisini (govde okumadan) hesapla. Ayni zamanda dosyanin
+    # acilabilir (kilitli degil) oldugunu DOGRULAR; kilitliyse bos PST uretmeden
+    # anlasilir bir hata veririz.
+    try:
+        total = engine_libpff.count_selected(ost_path, selection)
+    except Exception as exc:
+        raise ConversionError(_friendly_error(str(exc))) from exc
+
     tmp_dir = tempfile.mkdtemp(prefix="ost2pst_")
+    # Sinirli kuyruk: uretici (libpff) tuketiciden (Outlook) cok one gecmesin ->
+    # disk/bellek kontrollu kalir, iki taraf eszamanli ilerler.
+    q: "queue.Queue" = queue.Queue(maxsize=500)
+    producer_error: Dict[str, Exception] = {}
+    _SENTINEL = object()
+
+    def producer() -> None:
+        try:
+            engine_libpff.stream_selected_eml(ost_path, selection, q.put, tmp_dir)
+        except Exception as exc:  # pragma: no cover - pypff'e bagli
+            producer_error["exc"] = exc
+        finally:
+            q.put(_SENTINEL)
+
+    def source():
+        while True:
+            item = q.get()
+            if item is _SENTINEL:
+                break
+            yield item
+
     try:
         report(
-            "Ipucu: Cok sayida e-posta varsa bu islem uzun surebilir. Canli bir "
-            "Outlook hesabi icin 'Posta Kutusu -> PST' sekmesi cok daha hizlidir.",
+            "Okuma (libpff) ve PST yazma (Outlook) eszamanli calisir; bu, "
+            "asamali yonteme gore belirgin sekilde daha hizlidir.",
             -1.0,
         )
-        report("Asama 1/2: OST okunuyor ve gecici olarak cikariliyor...", -1.0)
+        thread = threading.Thread(target=producer, daemon=True)
+        thread.start()
 
-        def stage1(m: str, f: float) -> None:
-            report(m, (f * 0.5) if f >= 0 else f)
-
-        engine_libpff.export_selected_eml(
-            ost_path, tmp_dir, selection, stage1, short_names=True
+        result = engine_outlook.import_stream_to_pst(
+            pst_path, source(), total, progress
         )
-
-        report("Asama 2/2: Outlook ile PST olusturuluyor...", 0.5)
-
-        def stage2(m: str, f: float) -> None:
-            report(m, (0.5 + f * 0.5) if f >= 0 else f)
-
-        result = engine_outlook.import_eml_tree_to_pst(tmp_dir, pst_path, stage2)
+        thread.join()
+        if "exc" in producer_error:
+            raise producer_error["exc"]
         return result
     except ConversionError:
         raise

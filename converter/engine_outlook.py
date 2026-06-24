@@ -386,3 +386,122 @@ def import_eml_tree_to_pst(
     else:
         report("Bitti.", 1.0)
     return pst_path
+
+
+@_with_com
+def import_stream_to_pst(
+    pst_path: str,
+    source,
+    total: int,
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> str:
+    """Akan (chain, eml_path) ogelerini yeni bir PST'ye aktarir (boru hatti).
+
+    ``source`` : ``(name_chain, eml_path)`` ogeleri ureten bir yineleyici.
+        ``name_chain`` kok->klasor gercek ad demeti; ``eml_path`` gecici .eml
+        dosyasi. ``eml_path`` None ise oge okunamamistir (sayilir, atlanir).
+        Aktarilan her .eml dosyasi islendikten sonra silinir (disk kontrollu).
+
+    libpff uretici parcacigi mesajlari okuyup yazarken bu tuketici Outlook'a
+    eszamanli aktarir; boylece toplam sure iki asamanin toplami yerine
+    yavas olanina yaklasir.
+    """
+    if not is_available():
+        raise RuntimeError("Outlook / pywin32 bu makinede bulunamadi.")
+
+    def report(msg: str, frac: float = -1.0) -> None:
+        if progress:
+            progress(msg, frac)
+
+    pst_path = os.path.abspath(pst_path)
+    if not pst_path.lower().endswith(".pst"):
+        pst_path += ".pst"
+    if os.path.exists(pst_path):
+        raise FileExistsError(f"Hedef dosya zaten var: {pst_path}")
+    os.makedirs(os.path.dirname(pst_path) or ".", exist_ok=True)
+
+    ns = _namespace()
+    report("Hedef PST dosyasi olusturuluyor...", 0.0)
+    ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
+
+    dest_store = None
+    for i in range(1, ns.Stores.Count + 1):
+        st = ns.Stores.Item(i)
+        try:
+            if (st.FilePath or "").lower() == pst_path.lower():
+                dest_store = st
+                break
+        except Exception:
+            continue
+    if dest_store is None:
+        raise RuntimeError("Olusturulan PST store profilde bulunamadi.")
+    dest_root = dest_store.GetRootFolder()
+
+    total = max(1, int(total))
+    done = 0
+    fail = 0
+    fail_logged = 0
+    step = max(25, total // 200)
+
+    def get_or_create(parent, name: str):
+        for i in range(1, parent.Folders.Count + 1):
+            try:
+                if parent.Folders.Item(i).Name == name:
+                    return parent.Folders.Item(i)
+            except Exception:
+                continue
+        return parent.Folders.Add(name)
+
+    folder_cache = {(): dest_root}
+
+    def folder_for(chain):
+        if chain in folder_cache:
+            return folder_cache[chain]
+        parent = folder_for(chain[:-1])
+        folder = get_or_create(parent, chain[-1])
+        folder_cache[chain] = folder
+        return folder
+
+    report("Aktariliyor...", 0.0)
+    for chain, eml_path in source:
+        if eml_path is None:
+            done += 1
+        else:
+            try:
+                folder = folder_for(tuple(chain))
+            except Exception as exc:
+                report(f"  ! Klasor olusturulamadi: {exc}")
+                folder = dest_root
+            item = None
+            try:
+                item = ns.OpenSharedItem(eml_path)
+                item.Move(folder)
+            except Exception as exc:  # pragma: no cover - Outlook'a bagli
+                fail += 1
+                if fail_logged < 15:
+                    fail_logged += 1
+                    report(f"  ! Oge aktarilamadi: {exc}")
+                elif fail_logged == 15:
+                    fail_logged += 1
+                    report("  ! (daha fazla aktarilamayan oge sessizce gecilecek)")
+            finally:
+                item = None
+                try:
+                    os.remove(eml_path)
+                except Exception:
+                    pass
+            done += 1
+        if done % step == 0 or done >= total:
+            report(f"{done}/{total} mesaj PST'ye yazildi", min(1.0, done / total))
+
+    report("PST dosyasi kapatiliyor...", 0.99)
+    try:
+        ns.RemoveStore(dest_root)
+    except Exception:
+        pass
+    if fail:
+        report(f"Bitti. {total - fail}/{total} mesaj yazildi, {fail} oge atlandi.",
+               1.0)
+    else:
+        report("Bitti.", 1.0)
+    return pst_path

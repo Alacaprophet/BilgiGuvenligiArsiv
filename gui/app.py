@@ -190,8 +190,9 @@ class App(ttk.Frame):
         sel_head.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(PAD, 2))
         sel_head.columnconfigure(0, weight=1)
         self.var_tree_info = tk.StringVar(
-            value="OST secince icerik burada gosterilir. Satira tiklayarak "
-            "isaretleyin; klasoru acinca mesajlari da tek tek secebilirsiniz."
+            value="OST secince icerik burada gosterilir (yalnizca mail iceren "
+            "klasorler). Satira tiklayarak isaretleyin; klasoru acinca mesajlari "
+            "tek tek de secebilirsiniz."
         )
         ttk.Label(sel_head, textvariable=self.var_tree_info,
                   style="Sub.TLabel").grid(row=0, column=0, sticky="w")
