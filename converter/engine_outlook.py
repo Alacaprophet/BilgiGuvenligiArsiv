@@ -460,8 +460,30 @@ def import_eml_tree_to_pst(
         ns.RemoveStore(dest_root)
     except Exception:
         pass
+
+    # Hicbir mesaj yazilamadiysa (orn. Outlook .eml dosyalarini acamiyor:
+    # 'Gecersiz yol veya URL' - .eml dosya iliskisi yok), yaniltici "basarili"
+    # vermeyelim: bos PST'yi silip net hata atalim ve 2. sekmeye yonlendirelim.
+    success = done - fail
+    if done > 0 and success == 0:
+        try:
+            if actual_path and os.path.exists(actual_path):
+                os.remove(actual_path)
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Hicbir mesaj PST'ye yazilamadi. Outlook .eml dosyalarini acamadi "
+            "('Gecersiz yol veya URL').\n\n"
+            "Sebep: Bu makinede .eml dosya iliskisi tanimli degil (Windows "
+            "Server / sanal makinelerde yaygin); 'OST Dosyasi -> PST' yontemi "
+            "bu nedenle calismiyor.\n\n"
+            "COZUM: 2. sekme 'Posta Kutusu -> PST'yi kullanin. O yontem .eml/"
+            "dosya kullanmaz; Outlook'tan klasorleri dogrudan kopyalar ve bu "
+            "hatadan etkilenmez (canli/tanimli hesabiniz icin de en dogru yol)."
+        )
+
     if fail:
-        report(f"Bitti. {total - fail}/{total} mesaj yazildi, {fail} oge atlandi.",
+        report(f"Bitti. {success}/{total} mesaj yazildi, {fail} oge atlandi.",
                1.0)
     else:
         report("Bitti.", 1.0)
