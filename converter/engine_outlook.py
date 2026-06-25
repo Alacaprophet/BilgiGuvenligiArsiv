@@ -228,11 +228,17 @@ def _create_pst_store(ns, pst_path: str, report=None):
         ns.AddStoreEx(pst_path, OL_STORE_UNICODE)
     except Exception as exc:
         raise RuntimeError(
-            "PST dosyasi olusturulamadi: %s\n\n"
-            "Bu genellikle kurumsal bir guvenlik politikasinin (Group Policy) "
-            "yeni PST olusturmayi/eklemeyi engellemesinden kaynaklanir.\n"
-            "Cozum: 'Cikti bicimi' olarak EML klasoru veya MBOX secin "
-            "(Outlook gerektirmez, ayni icerigi kurtarir)." % exc
+            "PST olusturulamadi / bu oturumda yuklenemedi: %s\n\n"
+            "EN OLASI SEBEP: Bu makinedeki Outlook'ta tanimli bir PROFIL yok. "
+            "Outlook, profil olmadan PST veri dosyasi yukleyemez (bu yuzden "
+            "mesajlar PST'ye yazilmaz, dosya bos/265 KB kalir).\n\n"
+            "COZUM 1 (PST icin): Outlook'a bir profil tanimlayin -> Denetim "
+            "Masasi > 'Mail (Microsoft Outlook)' > 'Profilleri Goster' > 'Ekle' "
+            "ile bir profil olusturun (herhangi bir hesap olabilir; salih "
+            "hesabinin bilgileri SART DEGIL), Outlook'u bir kez acin, sonra "
+            "tekrar deneyin.\n\n"
+            "COZUM 2 (profilsiz, garanti): 'Cikti bicimi = EML klasoru' secin; "
+            "Outlook gerektirmez, tum icerigi eksiksiz verir." % exc
         ) from exc
 
     dest_store = None
