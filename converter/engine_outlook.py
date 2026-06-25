@@ -365,10 +365,19 @@ def import_eml_tree_to_pst(
 ) -> str:
     """Bir .eml klasor agacini Outlook araciligi ile yeni bir PST'ye aktarir.
 
-    libpff motoru orphan bir OST'yi .eml agacina cevirir; bu fonksiyon da onu
-    Outlook'un olusturdugu GERCEK bir PST'ye yazar. Boylece sonuc dosyasi
-    Outlook'ta sorunsuz acilir.
+    Once ``OpenSharedItem`` (Outlook'un yerlesik .eml ice aktarimi) denenir;
+    ``.eml`` dosya iliskisi olmayan makinelerde ('Gecersiz yol/URL') ise ayni
+    .eml AYRISTIRILIP mesaj DOGRUDAN olusturulur. Boylece her iki ortamda da
+    calisir. Outlook cokerse yeniden baglanir, her 500 mesajda PST diske yazilir.
     """
+    import re as _re
+    import gc as _gc
+    import time as _time
+    import email as _email
+    import tempfile as _tempfile
+    from email import policy as _email_policy
+    from email.utils import parsedate_to_datetime as _parsedate
+
     if not is_available():
         raise RuntimeError("Outlook / pywin32 bu makinede bulunamadi.")
 
@@ -377,20 +386,62 @@ def import_eml_tree_to_pst(
             progress(msg, frac)
 
     pst_path = _prepare_pst_path(pst_path)
-
-    ns = _namespace()
-    report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    dest_store, actual_path = _create_pst_store(ns, pst_path, report)
-    dest_root = dest_store.GetRootFolder()
-
     total = max(1, _count_eml(eml_root))
     done = 0
     fail = 0
     fail_logged = 0
-    # ~200 ilerleme guncellemesi -> akici arayuz, az COM/kuyruk yuku.
     step = max(25, total // 200)
+    FLUSH_EVERY = 500
+    used_fallback = {"v": False}
 
-    def get_or_create(parent, name: str):
+    state = {"ns": None, "root": None}
+    folder_cache = {}
+
+    def _connect(create):
+        ns2 = _namespace()
+        if create:
+            store, actual = _create_pst_store(ns2, pst_path, report)
+        else:
+            store = _add_existing_pst_store(ns2, pst_path)
+            try:
+                actual = store.FilePath or pst_path
+            except Exception:
+                actual = pst_path
+        state["ns"] = ns2
+        state["root"] = store.GetRootFolder()
+        folder_cache.clear()
+        folder_cache["."] = state["root"]
+        return actual
+
+    def _reconnect():
+        for attempt in range(6):
+            try:
+                _time.sleep(min(2 * (attempt + 1), 10))
+                _connect(create=False)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _flush_reopen():
+        try:
+            state["ns"].RemoveStore(state["root"])
+        except Exception:
+            pass
+        _gc.collect()
+        try:
+            _connect(create=False)
+            return True
+        except Exception:
+            return _reconnect()
+
+    def _is_disconnect(exc):
+        try:
+            return bool(exc.args) and exc.args[0] in _DISCONNECT_CODES
+        except Exception:
+            return False
+
+    def get_or_create(parent, name):
         for i in range(1, parent.Folders.Count + 1):
             try:
                 if parent.Folders.Item(i).Name == name:
@@ -399,9 +450,8 @@ def import_eml_tree_to_pst(
                 continue
         return parent.Folders.Add(name)
 
-    def display_name_for(current_dir: str, fallback: str) -> str:
-        """Klasorun GERCEK adini yan dosyadan okur; yoksa dizin adina duser."""
-        side = os.path.join(current_dir, FOLDERNAME_FILE)
+    def display_name_for(dir_path, fallback):
+        side = os.path.join(dir_path, FOLDERNAME_FILE)
         try:
             if os.path.exists(side):
                 with open(side, "r", encoding="utf-8") as fh:
@@ -412,58 +462,173 @@ def import_eml_tree_to_pst(
             pass
         return fallback
 
-    # rel-dizin yolu -> Outlook klasoru. os.walk YUKARIDAN-asagiya gezdigi icin
-    # bir dizine gelindiginde ebeveyni daima onbellekte hazirdir.
-    folder_cache = {".": dest_root}
+    def folder_for_rel(rel):
+        if rel in folder_cache:
+            return folder_cache[rel]
+        if not rel or rel == ".":
+            folder_cache["."] = state["root"]
+            return state["root"]
+        parent_rel = os.path.dirname(rel) or "."
+        parent = folder_for_rel(parent_rel)
+        dname = display_name_for(os.path.join(eml_root, rel), os.path.basename(rel))
+        folder = get_or_create(parent, dname)
+        folder_cache[rel] = folder
+        return folder
 
-    for current_dir, _dirs, files in os.walk(eml_root):
-        rel = os.path.relpath(current_dir, eml_root)
-        if rel == ".":
-            folder = dest_root
+    _bad = _re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+    att_dir = _tempfile.mkdtemp(prefix="ost2pst_att_")
+
+    def _direct_from_eml(folder, path):
+        """OpenSharedItem calismadiginda: .eml'i ayristirip mesaji dogrudan kur."""
+        with open(path, "rb") as fh:
+            em = _email.message_from_binary_file(fh, policy=_email_policy.default)
+        item = folder.Items.Add("IPM.Note")
+        item.Subject = (em.get("Subject") or "(konusuz)")
+        plain = html = ""
+        try:
+            bp = em.get_body(preferencelist=("plain",))
+            if bp is not None:
+                plain = bp.get_content()
+        except Exception:
+            pass
+        try:
+            bh = em.get_body(preferencelist=("html",))
+            if bh is not None:
+                html = bh.get_content()
+        except Exception:
+            pass
+        if html:
+            try:
+                item.HTMLBody = html
+            except Exception:
+                item.Body = plain or ""
         else:
-            parent_rel = os.path.dirname(rel) or "."
-            parent_folder = folder_cache.get(parent_rel, dest_root)
-            name = display_name_for(current_dir, os.path.basename(current_dir))
-            try:
-                folder = get_or_create(parent_folder, name)
-            except Exception as exc:
-                report(f"  ! Klasor olusturulamadi ({name}): {exc}")
-                folder = dest_root
-            folder_cache[rel] = folder
+            item.Body = plain or ""
+        pa = item.PropertyAccessor
 
-        for fname in files:
-            if fname == FOLDERNAME_FILE:
-                continue
-            if not fname.lower().endswith(".eml"):
-                continue
-            full = os.path.join(current_dir, fname)
-            item = None
+        def setp(tag, val):
             try:
-                item = ns.OpenSharedItem(full)
-                item.Move(folder)
-            except Exception as exc:  # pragma: no cover - Outlook'a bagli
-                fail += 1
-                if fail_logged < 15:
-                    fail_logged += 1
-                    report(f"  ! {fname} aktarilamadi: {exc}")
-                elif fail_logged == 15:
-                    fail_logged += 1
-                    report("  ! (daha fazla aktarilamayan oge sessizce gecilecek)")
-            finally:
-                item = None
-            done += 1
-            if done % step == 0 or done == total:
-                report(f"{done}/{total} mesaj PST'ye yazildi", min(1.0, done / total))
+                pa.SetProperty(tag, val)
+            except Exception:
+                pass
+
+        frm = em.get("From", "") or ""
+        to = em.get("To", "") or ""
+        cc = em.get("Cc", "") or ""
+        if frm:
+            setp(_PR_SENDER_NAME, frm)
+            setp(_PR_SENT_REPR_NAME, frm)
+        if to:
+            setp(_PR_DISPLAY_TO, to)
+        if cc:
+            setp(_PR_DISPLAY_CC, cc)
+        dt = em.get("Date")
+        if dt:
+            try:
+                d = _parsedate(dt)
+                if d:
+                    setp(_PR_DELIVERY_TIME, d)
+                    setp(_PR_SUBMIT_TIME, d)
+            except Exception:
+                pass
+        for idx, att in enumerate(em.iter_attachments()):
+            try:
+                data = att.get_payload(decode=True) or b""
+                name = _bad.sub("_", (att.get_filename() or "ek_%d.bin" % idx))[:120]
+                pth = os.path.join(att_dir, name or ("ek_%d.bin" % idx))
+                with open(pth, "wb") as fh:
+                    fh.write(data)
+                item.Attachments.Add(pth)
+                try:
+                    os.remove(pth)
+                except Exception:
+                    pass
+            except Exception:
+                continue
+        item.Save()
+
+    def _write_one(rel, full):
+        folder = folder_for_rel(rel)
+        # 1) Outlook'un yerlesik .eml ice aktarimi (en yuksek sadakat).
+        try:
+            it = state["ns"].OpenSharedItem(full)
+            it.Move(folder)
+            return
+        except Exception as exc:
+            if _is_disconnect(exc):
+                raise  # disti loop yeniden baglansin
+            # .eml iliskisi yok / acamadi -> ayristirip dogrudan kur.
+            used_fallback["v"] = True
+        _direct_from_eml(folder, full)
+
+    report("Hedef PST dosyasi olusturuluyor...", 0.0)
+    actual_path = _connect(create=True)
+    report("Aktariliyor...", 0.0)
+    aborted = False
+    try:
+        for current_dir, _dirs, files in os.walk(eml_root):
+            rel = os.path.relpath(current_dir, eml_root)
+            for fname in files:
+                if fname == FOLDERNAME_FILE or not fname.lower().endswith(".eml"):
+                    continue
+                full = os.path.join(current_dir, fname)
+                ok = False
+                try:
+                    _write_one(rel, full)
+                    ok = True
+                except Exception as exc:
+                    if _is_disconnect(exc):
+                        report("  ! Outlook baglantisi koptu; yeniden "
+                               "baglaniliyor...")
+                        if _reconnect():
+                            try:
+                                _write_one(rel, full)
+                                ok = True
+                            except Exception:
+                                ok = False
+                        else:
+                            report("  ! Outlook'a yeniden baglanilamadi; kalanlar "
+                                   "atlandi.")
+                            aborted = True
+                            break
+                    else:
+                        ok = False
+                if not ok:
+                    fail += 1
+                    if fail_logged < 15:
+                        fail_logged += 1
+                        try:
+                            emsg = str(exc)
+                        except Exception:
+                            emsg = "?"
+                        report(f"  ! {fname} aktarilamadi: {emsg}")
+                    elif fail_logged == 15:
+                        fail_logged += 1
+                        report("  ! (daha fazla aktarilamayan oge gecilecek)")
+                done += 1
+                if done % step == 0 or done >= total:
+                    report(f"{done}/{total} mesaj PST'ye yazildi",
+                           min(1.0, done / total))
+                if done % 250 == 0:
+                    _gc.collect()
+                if done % FLUSH_EVERY == 0:
+                    report("  (ara kayit: PST diske yaziliyor...)")
+                    if not _flush_reopen():
+                        report("  ! Yeniden acilamadi; kalanlar atlandi.")
+                        aborted = True
+                        break
+            if aborted:
+                break
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(att_dir, ignore_errors=True)
 
     report("PST dosyasi kapatiliyor...", 0.99)
     try:
-        ns.RemoveStore(dest_root)
+        state["ns"].RemoveStore(state["root"])
     except Exception:
         pass
 
-    # Hicbir mesaj yazilamadiysa (orn. Outlook .eml dosyalarini acamiyor:
-    # 'Gecersiz yol veya URL' - .eml dosya iliskisi yok), yaniltici "basarili"
-    # vermeyelim: bos PST'yi silip net hata atalim ve 2. sekmeye yonlendirelim.
     success = done - fail
     if done > 0 and success == 0:
         try:
@@ -472,22 +637,23 @@ def import_eml_tree_to_pst(
         except Exception:
             pass
         raise RuntimeError(
-            "Hicbir mesaj PST'ye yazilamadi. Outlook .eml dosyalarini acamadi "
-            "('Gecersiz yol veya URL').\n\n"
-            "Sebep: Bu makinede .eml dosya iliskisi tanimli degil (Windows "
-            "Server / sanal makinelerde yaygin); 'OST Dosyasi -> PST' yontemi "
-            "bu nedenle calismiyor.\n\n"
-            "COZUM: 2. sekme 'Posta Kutusu -> PST'yi kullanin. O yontem .eml/"
-            "dosya kullanmaz; Outlook'tan klasorleri dogrudan kopyalar ve bu "
-            "hatadan etkilenmez (canli/tanimli hesabiniz icin de en dogru yol)."
+            "Hicbir mesaj PST'ye yazilamadi.\n"
+            "Outlook bu makinede mesajlari PST'ye islemiyor olabilir "
+            "(profilsiz/kararsiz Outlook). 'Cikti bicimi = EML klasoru' ile "
+            "icerigi tam alabilir, PST'yi Outlook'un duzgun calistigi bir "
+            "makinede uretebilirsiniz."
         )
 
+    tail = " (yarida kesildi)" if aborted else ""
+    if used_fallback["v"]:
+        tail += " [.eml iliskisi yok -> dogrudan olusturma kullanildi]"
     if fail:
-        report(f"Bitti. {success}/{total} mesaj yazildi, {fail} oge atlandi.",
-               1.0)
+        report(f"Bitti. {success}/{total} mesaj yazildi, {fail} atlandi.{tail}", 1.0)
     else:
-        report("Bitti.", 1.0)
+        report(f"Bitti. {success} mesaj.{tail}", 1.0)
     return actual_path
+
+
 
 
 # MAPI proptag adlari (PropertyAccessor icin). .eml/OpenSharedItem KULLANMADAN

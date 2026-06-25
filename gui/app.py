@@ -160,6 +160,7 @@ class App(ttk.Frame):
         fmt_frame.grid(row=2, column=1, columnspan=2, sticky="w", pady=(PAD, 0))
         for text, val in [
             ("PST (Outlook gerekli)", "pst"),
+            ("PST (EML uzerinden)", "pst_eml"),
             ("EML klasoru", "eml"),
             ("MBOX dosyasi", "mbox"),
         ]:
@@ -329,7 +330,7 @@ class App(ttk.Frame):
     def _on_fmt_change(self) -> None:
         eng = core.available_engines()
         fmt = self.var_fmt.get()
-        if fmt == "pst" and not eng["outlook"]:
+        if fmt in ("pst", "pst_eml") and not eng["outlook"]:
             self.var_status.set("Not: PST cikti icin Outlook gerekli; "
                                 "yoksa EML/MBOX secin.")
         else:
@@ -614,6 +615,9 @@ class App(ttk.Frame):
         if fmt == "pst":
             dst = _unique_path(os.path.join(out_dir, base + ".pst"))
             fn = core.file_to_pst
+        elif fmt == "pst_eml":
+            dst = _unique_path(os.path.join(out_dir, base + ".pst"))
+            fn = core.file_to_pst_via_eml
         elif fmt == "mbox":
             dst = _unique_path(os.path.join(out_dir, base + ".mbox"))
             fn = core.file_to_mbox

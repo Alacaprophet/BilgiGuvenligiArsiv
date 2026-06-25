@@ -200,9 +200,58 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
         raise ConversionError(_friendly_error(str(exc))) from exc
 
 
-# --------------------------------------------------------------------------- #
-# 3) Disk uzerindeki .ost dosyasi -> EML agaci veya MBOX  (Outlook gerekmez)
-# --------------------------------------------------------------------------- #
+def file_to_pst_via_eml(ost_path: str, pst_path: str, progress: Progress = None,
+                        selection: Optional[Dict] = None) -> str:
+    """Secimi once .eml agacina cikarir, sonra Outlook ile PST'ye AKTARIR.
+
+    Kullanicinin istedigi 'EML uzerinden' akis: secilen mesajlar gecici bir
+    .eml agacina yazilir; ardindan Outlook bunlari (OpenSharedItem; o calismazsa
+    ayristirip dogrudan) PST'ye tasir. Klasorler EML klasor adlariyla olusur.
+    """
+    if not engine_libpff.is_available():
+        raise ConversionError(
+            "OST dosyasini okumak icin libpff gereklidir."
+        )
+    if not engine_outlook.is_available():
+        raise ConversionError(
+            "PST uretmek icin Outlook + pywin32 gereklidir.\n"
+            "Outlook yoksa 'EML klasoru' veya 'MBOX' secin."
+        )
+
+    def report(m: str, f: float = -1.0) -> None:
+        if progress:
+            progress(m, f)
+
+    tmp_dir = tempfile.mkdtemp(prefix="ost2pst_")
+    try:
+        report("Asama 1/2: Secilenler EML'e cikariliyor...", -1.0)
+
+        def stage1(m: str, f: float) -> None:
+            report(m, (f * 0.5) if f >= 0 else f)
+
+        engine_libpff.export_selected_eml(
+            ost_path, tmp_dir, selection, stage1, short_names=True
+        )
+
+        n_eml = 0
+        for _r, _d, _f in os.walk(tmp_dir):
+            n_eml += sum(1 for x in _f if x.lower().endswith(".eml"))
+        report(f"Asama 1 bitti: {n_eml} e-posta EML olarak cikarildi.", 0.5)
+        if n_eml == 0:
+            raise ConversionError("Hic e-posta cikarilamadi (secim bos olabilir).")
+
+        report("Asama 2/2: EML'ler Outlook ile PST'ye tasiniyor...", 0.5)
+
+        def stage2(m: str, f: float) -> None:
+            report(m, (0.5 + f * 0.5) if f >= 0 else f)
+
+        return engine_outlook.import_eml_tree_to_pst(tmp_dir, pst_path, stage2)
+    except ConversionError:
+        raise
+    except Exception as exc:
+        raise ConversionError(_friendly_error(str(exc))) from exc
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 def file_to_eml(ost_path: str, out_dir: str, progress: Progress = None,
                 selection: Optional[Dict] = None) -> str:
     if not engine_libpff.is_available():
@@ -238,5 +287,6 @@ class Conversion:
     matching_outlook_store = staticmethod(matching_outlook_store)
     mailbox_to_pst = staticmethod(mailbox_to_pst)
     file_to_pst = staticmethod(file_to_pst)
+    file_to_pst_via_eml = staticmethod(file_to_pst_via_eml)
     file_to_eml = staticmethod(file_to_eml)
     file_to_mbox = staticmethod(file_to_mbox)
