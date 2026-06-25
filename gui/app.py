@@ -212,7 +212,7 @@ class App(ttk.Frame):
         tree_wrap.columnconfigure(0, weight=1)
         tree_wrap.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(tree_wrap, show="tree", selectmode="none",
-                                 style="Tree.Treeview", height=10)
+                                 style="Tree.Treeview", height=7)
         self.tree.grid(row=0, column=0, sticky="nsew")
         tsb = ttk.Scrollbar(tree_wrap, command=self.tree.yview)
         tsb.grid(row=0, column=1, sticky="ns")
@@ -266,7 +266,9 @@ class App(ttk.Frame):
         frame.grid(row=2, column=0, sticky="nsew", pady=(PAD, 0))
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(2, weight=1)
-        self.rowconfigure(2, weight=1)
+        # Durum/gunluk alanina, sekme alanindan daha fazla dikey pay ver
+        # (anlik loglar rahat okunsun).
+        self.rowconfigure(2, weight=2)
 
         self.progress = ttk.Progressbar(frame, mode="determinate", maximum=1.0)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -279,8 +281,8 @@ class App(ttk.Frame):
         log_wrap.grid(row=2, column=0, sticky="nsew")
         log_wrap.columnconfigure(0, weight=1)
         log_wrap.rowconfigure(0, weight=1)
-        self.log = tk.Text(log_wrap, height=8, wrap="word", state="disabled",
-                           font=("Consolas", 9), background="#1e1e1e",
+        self.log = tk.Text(log_wrap, height=15, wrap="word", state="disabled",
+                           font=("Consolas", 10), background="#1e1e1e",
                            foreground="#d4d4d4", insertbackground="#d4d4d4")
         self.log.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(log_wrap, command=self.log.yview)
@@ -352,12 +354,6 @@ class App(ttk.Frame):
         if not src or not os.path.exists(src):
             self.var_tree_info.set("Gecerli bir OST dosyasi secin.")
             return
-        if not core.available_engines()["libpff"]:
-            self.var_tree_info.set(
-                "Icerik onizleme icin libpff gerekli ('pip install libpff-python'). "
-                "Yine de tum dosyayi donusturebilirsiniz."
-            )
-            return
         self._current_ost = os.path.normpath(src)
         self.var_tree_info.set("Icerik okunuyor...")
         self._tree_token += 1
@@ -365,6 +361,16 @@ class App(ttk.Frame):
 
         def work() -> None:
             try:
+                # Once: bu OST Outlook'ta TANIMLI bir hesaba mi ait? Oyleyse
+                # icerik onizlemeye gerek yok (dosya kilitli olabilir); donusum
+                # TUM klasorleri dogrudan kopyalar.
+                store_name = core.matching_outlook_store(self._current_ost)
+                if store_name:
+                    self._queue.put(("tree_store", token, store_name))
+                    return
+                if not core.available_engines()["libpff"]:
+                    self._queue.put(("tree_err", token, "__nolibpff__"))
+                    return
                 nodes = core.list_ost_tree(self._current_ost)
                 self._queue.put(("tree", token, nodes))
             except Exception as exc:
@@ -675,10 +681,25 @@ class App(ttk.Frame):
                     _, token, nodes = item
                     if token == self._tree_token:
                         self._populate_tree(nodes)
+                elif kind == "tree_store":
+                    _, token, store_name = item
+                    if token == self._tree_token:
+                        self._clear_tree()
+                        self.var_tree_info.set(
+                            f"Bu OST, Outlook'ta TANIMLI hesaba ait ({store_name}). "
+                            "Donustur'e basinca TUM klasorler dogrudan kopyalanir; "
+                            "icerik onizleme/secim gerekmez."
+                        )
                 elif kind == "tree_err":
                     _, token, msg = item
                     if token == self._tree_token:
-                        self.var_tree_info.set("Icerik okunamadi: " + msg)
+                        if msg == "__nolibpff__":
+                            self.var_tree_info.set(
+                                "Icerik onizleme icin libpff gerekli; yine de tum "
+                                "dosyayi donusturebilirsiniz."
+                            )
+                        else:
+                            self.var_tree_info.set("Icerik okunamadi: " + msg)
                 elif kind == "msgs":
                     _, token, fid, msgs = item
                     if token == self._tree_token:
@@ -758,8 +779,8 @@ class App(ttk.Frame):
 def main() -> None:
     root = tk.Tk()
     root.title(APP_TITLE)
-    root.geometry("820x760")
-    root.minsize(720, 620)
+    root.geometry("920x960")
+    root.minsize(800, 760)
     App(root)
     root.mainloop()
 

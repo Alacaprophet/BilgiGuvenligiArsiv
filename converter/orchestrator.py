@@ -56,6 +56,26 @@ def list_outlook_stores() -> List["engine_outlook.StoreInfo"]:
     return engine_outlook.list_stores()
 
 
+def matching_outlook_store(ost_path: str):
+    """Secilen .ost, Outlook'ta TANIMLI bir hesabin dosyasiyla eslesiyor mu?
+
+    Eslesiyorsa o store'un goruntu adini, yoksa None dondurur. (Eslesen OST'ler
+    dogrudan kopyalama (CopyTo) ile cevrilir; ayrica dosya Outlook tarafindan
+    kilitli olabilecegi icin libpff ile icerik onizlemesi denenmez.)
+    """
+    if not engine_outlook.is_available():
+        return None
+    try:
+        norm = os.path.normpath(os.path.abspath(ost_path)).lower()
+        for st in engine_outlook.list_stores():
+            fp = getattr(st, "file_path", "") or ""
+            if fp and os.path.normpath(os.path.abspath(fp)).lower() == norm:
+                return getattr(st, "name", "") or "Outlook hesabi"
+    except Exception:
+        return None
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # OST icerigini kesfetme (arayuzdeki secim agaci icin)
 # --------------------------------------------------------------------------- #
@@ -215,6 +235,7 @@ class Conversion:
     list_outlook_stores = staticmethod(list_outlook_stores)
     list_ost_tree = staticmethod(list_ost_tree)
     list_ost_folder_messages = staticmethod(list_ost_folder_messages)
+    matching_outlook_store = staticmethod(matching_outlook_store)
     mailbox_to_pst = staticmethod(mailbox_to_pst)
     file_to_pst = staticmethod(file_to_pst)
     file_to_eml = staticmethod(file_to_eml)
