@@ -165,56 +165,19 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
             "Lutfen mail iceren klasorleri isaretleyin (veya 'Tumunu sec')."
         )
 
-    # Iki asamali, GUVENILIR yontem:
-    #   1) Secili tum mesajlar gecici olarak .eml agacina cikarilir.
-    #   2) Outlook bunlarin tamamini PST'ye aktarir (dosyalar is bitene kadar
-    #      SILINMEZ; aksi halde OpenSharedItem aktarimi tamamlanmadan dosya
-    #      silinirse PST bos kalir).
-    tmp_dir = tempfile.mkdtemp(prefix="ost2pst_")
+    # Orphan OST (Outlook'ta tanimli DEGIL): libpff ile okunan her mesaji
+    # Outlook'ta DOGRUDAN olusturup PST'ye yaz. .eml/OpenSharedItem KULLANILMAZ;
+    # bu yuzden .eml dosya iliskisi olmayan makinelerde de calisir. Yalnizca
+    # Outlook'un kurulu olmasi yeterlidir.
     try:
-        report("Asama 1/2: OST okunuyor ve gecici olarak cikariliyor...", -1.0)
-
-        def stage1(m: str, f: float) -> None:
-            report(m, (f * 0.5) if f >= 0 else f)
-
-        engine_libpff.export_selected_eml(
-            ost_path, tmp_dir, selection, stage1, short_names=True
+        msg_iter = engine_libpff.iter_selected_messages(ost_path, selection)
+        return engine_outlook.import_messages_to_pst(
+            pst_path, msg_iter, total, progress
         )
-
-        # TESHIS: 1. asama gercekte kac .eml uretti? Bu tek sayi, bos PST'nin
-        # sebebini kesinlestirir (okuma mi, yazma mi).
-        n_eml = 0
-        for _root, _dirs, _files in os.walk(tmp_dir):
-            n_eml += sum(1 for x in _files if x.lower().endswith(".eml"))
-        report(f"Asama 1 bitti: {n_eml}/{total} e-posta gecici olarak cikarildi.",
-               0.5)
-        if n_eml == 0:
-            raise ConversionError(
-                "OST'nin klasor listesi okundu (%d mesaj gorundu) ANCAK mesaj "
-                "GOVDELERI cikarilamadi: 0 e-posta yazildi.\n\n"
-                "Bu genellikle su demektir:\n"
-                "  - OST su anda Outlook tarafindan aktif/kilitli kullaniliyor, "
-                "veya\n"
-                "  - bu OST bicimini libpff dogrudan okuyamiyor.\n\n"
-                "COZUM: Outlook'ta TANIMLI bu hesap icin 2. sekme "
-                "'Posta Kutusu -> PST'yi kullanin. O yontem dosyayi degil, "
-                "Outlook'un kendisini okur; kilit/bicim sorunu yasanmaz ve "
-                "icerigi tam aktarir." % total
-            )
-
-        report("Asama 2/2: Outlook ile PST olusturuluyor...", 0.5)
-
-        def stage2(m: str, f: float) -> None:
-            report(m, (0.5 + f * 0.5) if f >= 0 else f)
-
-        result = engine_outlook.import_eml_tree_to_pst(tmp_dir, pst_path, stage2)
-        return result
     except ConversionError:
         raise
     except Exception as exc:
         raise ConversionError(_friendly_error(str(exc))) from exc
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #

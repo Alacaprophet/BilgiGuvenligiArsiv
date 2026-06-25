@@ -651,6 +651,42 @@ def stream_selected_eml(
         _close_pff(pff, file_obj)
 
 
+def iter_selected_messages(path: str, selection: Optional[Selection] = None):
+    """Secilen mesajlari (chain, Message) olarak akisla uretir.
+
+    ``chain`` kok->klasor gercek ad demeti; ``Message`` ayristirilmis e-posta
+    (konu, gonderen, govde, HTML, tarih, basliklar, ekler). Outlook'ta mesajlari
+    DOGRUDAN olusturmak icin kullanilir (.eml/OpenSharedItem GEREKMEZ).
+
+    pff dosyasi yineleme boyunca acik tutulur; tuketici ayni is parcaciginda
+    senkron tuketmelidir.
+    """
+    pff, file_obj = _open_pff(path)
+    try:
+        root = pff.get_root_folder()
+        nodes = _node_list(root)
+        if selection is None:
+            selection = _full_selection(nodes)
+        byid = {n["id"]: n for n in nodes}
+        chains = _name_chains(nodes)
+        for fid, sel in selection.items():
+            if fid not in byid:
+                continue
+            try:
+                folder = _folder_by_id(root, fid)
+            except Exception:
+                continue
+            chain = chains.get(fid, (byid[fid]["name"],))
+            for i in _selected_indices(folder, sel):
+                try:
+                    msg = _read_message(folder.get_sub_message(i))
+                except Exception:
+                    continue
+                yield chain, msg
+    finally:
+        _close_pff(pff, file_obj)
+
+
 def export_selected_eml(
     path: str,
     out_dir: str,

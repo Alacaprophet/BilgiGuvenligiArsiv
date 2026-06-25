@@ -490,6 +490,192 @@ def import_eml_tree_to_pst(
     return actual_path
 
 
+# MAPI proptag adlari (PropertyAccessor icin). .eml/OpenSharedItem KULLANMADAN
+# mesaj olusturmak icin gerekli alanlar.
+_PR_SENDER_NAME = "http://schemas.microsoft.com/mapi/proptag/0x0C1A001F"
+_PR_SENDER_EMAIL = "http://schemas.microsoft.com/mapi/proptag/0x0C1F001F"
+_PR_SENT_REPR_NAME = "http://schemas.microsoft.com/mapi/proptag/0x0042001F"
+_PR_DELIVERY_TIME = "http://schemas.microsoft.com/mapi/proptag/0x0E060040"
+_PR_SUBMIT_TIME = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
+_PR_DISPLAY_TO = "http://schemas.microsoft.com/mapi/proptag/0x0E04001F"
+_PR_DISPLAY_CC = "http://schemas.microsoft.com/mapi/proptag/0x0E03001F"
+_PR_HEADERS = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
+
+
+@_with_com
+def import_messages_to_pst(
+    pst_path: str,
+    message_source,
+    total: int,
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> str:
+    """libpff'ten okunan mesajlari Outlook'ta DOGRUDAN olusturup PST'ye yazar.
+
+    ``.eml`` dosyasi ve ``OpenSharedItem`` KULLANMAZ; bu yuzden ``.eml`` dosya
+    iliskisi olmayan makinelerde (Windows Server vb.) de calisir. Yalnizca
+    Outlook'un kurulu olmasini gerektirir.
+
+    ``message_source`` : ``(chain, Message)`` ureten yineleyici. ``chain`` kok->
+        klasor gercek ad demeti; ``Message`` engine_libpff'in modelidir.
+    """
+    import re as _re
+    import tempfile as _tempfile
+    import datetime as _dt
+    from email.parser import Parser as _Parser
+    from email.policy import default as _default_policy
+
+    if not is_available():
+        raise RuntimeError("Outlook / pywin32 bu makinede bulunamadi.")
+
+    def report(msg: str, frac: float = -1.0) -> None:
+        if progress:
+            progress(msg, frac)
+
+    pst_path = _prepare_pst_path(pst_path)
+    ns = _namespace()
+    report("Hedef PST dosyasi olusturuluyor...", 0.0)
+    dest_store, actual_path = _create_pst_store(ns, pst_path, report)
+    dest_root = dest_store.GetRootFolder()
+
+    total = max(1, int(total))
+    done = 0
+    fail = 0
+    fail_logged = 0
+    step = max(25, total // 200)
+
+    def get_or_create(parent, name: str):
+        for i in range(1, parent.Folders.Count + 1):
+            try:
+                if parent.Folders.Item(i).Name == name:
+                    return parent.Folders.Item(i)
+            except Exception:
+                continue
+        return parent.Folders.Add(name)
+
+    folder_cache = {(): dest_root}
+
+    def folder_for(chain):
+        if chain in folder_cache:
+            return folder_cache[chain]
+        parent = folder_for(chain[:-1])
+        folder = get_or_create(parent, chain[-1])
+        folder_cache[chain] = folder
+        return folder
+
+    _bad = _re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+    def _att_name(name, idx):
+        name = _bad.sub("_", (name or "").strip()) or ("ek_%d.bin" % idx)
+        return name[:120]
+
+    att_dir = _tempfile.mkdtemp(prefix="ost2pst_att_")
+    report("Aktariliyor...", 0.0)
+    try:
+        for chain, msg in message_source:
+            try:
+                folder = folder_for(tuple(chain))
+                item = folder.Items.Add("IPM.Note")
+                item.Subject = getattr(msg, "subject", "") or "(konusuz)"
+
+                html = getattr(msg, "html_body", "") or ""
+                if html:
+                    try:
+                        item.HTMLBody = html
+                    except Exception:
+                        item.Body = getattr(msg, "plain_body", "") or ""
+                else:
+                    item.Body = getattr(msg, "plain_body", "") or ""
+
+                # Basliklardan alici/gonderen bilgisi (varsa).
+                to = cc = from_disp = ""
+                headers = getattr(msg, "headers", "") or ""
+                if headers:
+                    try:
+                        p = _Parser(policy=_default_policy).parsestr(
+                            headers, headersonly=True)
+                        to = p.get("To", "") or ""
+                        cc = p.get("Cc", "") or ""
+                        from_disp = p.get("From", "") or ""
+                    except Exception:
+                        pass
+
+                pa = item.PropertyAccessor
+
+                def setp(tag, val):
+                    try:
+                        pa.SetProperty(tag, val)
+                    except Exception:
+                        pass
+
+                sender = getattr(msg, "sender_name", "") or from_disp
+                if sender:
+                    setp(_PR_SENDER_NAME, sender)
+                    setp(_PR_SENT_REPR_NAME, sender)
+                if to:
+                    setp(_PR_DISPLAY_TO, to)
+                if cc:
+                    setp(_PR_DISPLAY_CC, cc)
+                if headers:
+                    setp(_PR_HEADERS, headers)
+                d = getattr(msg, "date", None)
+                if isinstance(d, _dt.datetime):
+                    setp(_PR_DELIVERY_TIME, d)
+                    setp(_PR_SUBMIT_TIME, d)
+
+                for idx, att in enumerate(getattr(msg, "attachments", []) or []):
+                    try:
+                        pth = os.path.join(att_dir, _att_name(att.name, idx))
+                        with open(pth, "wb") as fh:
+                            fh.write(att.data or b"")
+                        item.Attachments.Add(pth)
+                        try:
+                            os.remove(pth)
+                        except Exception:
+                            pass
+                    except Exception:
+                        continue
+
+                item.Save()
+            except Exception as exc:  # pragma: no cover - Outlook'a bagli
+                fail += 1
+                if fail_logged < 15:
+                    fail_logged += 1
+                    report(f"  ! Mesaj yazilamadi: {exc}")
+                elif fail_logged == 15:
+                    fail_logged += 1
+                    report("  ! (daha fazla yazilamayan oge sessizce gecilecek)")
+            done += 1
+            if done % step == 0 or done >= total:
+                report(f"{done}/{total} mesaj PST'ye yazildi", min(1.0, done / total))
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(att_dir, ignore_errors=True)
+
+    report("PST dosyasi kapatiliyor...", 0.99)
+    try:
+        ns.RemoveStore(dest_root)
+    except Exception:
+        pass
+
+    success = done - fail
+    if done > 0 and success == 0:
+        try:
+            if actual_path and os.path.exists(actual_path):
+                os.remove(actual_path)
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Hicbir mesaj PST'ye yazilamadi. Outlook mesaj olusturmayi reddetti. "
+            "Outlook'un acik/calisir oldugundan emin olun."
+        )
+
+    if fail:
+        report(f"Bitti. {success}/{total} mesaj yazildi, {fail} oge atlandi.", 1.0)
+    else:
+        report("Bitti.", 1.0)
+    return actual_path
+
+
 @_with_com
 def import_stream_to_pst(
     pst_path: str,
