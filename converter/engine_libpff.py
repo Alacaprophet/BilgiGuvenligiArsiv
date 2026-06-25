@@ -125,21 +125,53 @@ def _message_date(pff_msg):
     return None
 
 
+def _decode_text(val) -> str:
+    """libpff'ten gelen metni DOGRU kod sayfasiyla coz (Turkce karakterler icin).
+
+    Outlook OST govdeleri cogunlukla UTF-16 ya da Turkce tek-bayt kod sayfasinda
+    (cp1254 / ISO-8859-9) saklanir. Korlemesine UTF-8 cozmek ç ş ğ ı ö ü gibi
+    harfleri bozar. Bu yuzden once UTF-16, sonra katı UTF-8, sonra Turkce kod
+    sayfalari sirayla denenir.
+    """
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    if not isinstance(val, (bytes, bytearray)):
+        return str(val)
+    b = bytes(val)
+    if not b:
+        return ""
+    # UTF-16 mi? (cok sayida sifir bayt) -> oyleyse UTF-16 olarak coz.
+    if b.count(b"\x00") > len(b) // 4:
+        for enc in ("utf-16-le", "utf-16"):
+            try:
+                return b.decode(enc)
+            except Exception:
+                continue
+    # Gecerli UTF-8 ise oldugu gibi al.
+    try:
+        return b.decode("utf-8")
+    except Exception:
+        pass
+    # Turkce/Bati Avrupa tek-bayt kod sayfalari (cp1254 Turkce'yi tam kapsar).
+    for enc in ("cp1254", "iso-8859-9", "cp1252", "latin-1"):
+        try:
+            return b.decode(enc)
+        except Exception:
+            continue
+    return b.decode("utf-8", "replace")
+
+
 def _read_message(pff_msg) -> Message:
     msg = Message()
 
-    msg.subject = _safe(lambda: pff_msg.subject) or "(konusuz)"
-    msg.sender_name = _safe(lambda: pff_msg.sender_name)
-    msg.headers = _safe(lambda: pff_msg.transport_headers)
-    msg.plain_body = _safe(lambda: pff_msg.plain_text_body)
-    msg.html_body = _safe(lambda: pff_msg.html_body)
+    msg.subject = _decode_text(_safe(lambda: pff_msg.subject)) or "(konusuz)"
+    msg.sender_name = _decode_text(_safe(lambda: pff_msg.sender_name))
+    msg.headers = _decode_text(_safe(lambda: pff_msg.transport_headers))
+    msg.plain_body = _decode_text(_safe(lambda: pff_msg.plain_text_body))
+    msg.html_body = _decode_text(_safe(lambda: pff_msg.html_body))
     msg.date = _message_date(pff_msg)
-
-    # Bazi pypff surumleri bytes dondurur.
-    for attr in ("plain_body", "html_body", "headers"):
-        val = getattr(msg, attr)
-        if isinstance(val, bytes):
-            setattr(msg, attr, val.decode("utf-8", "replace"))
 
     try:
         for i in range(pff_msg.number_of_attachments):
@@ -361,8 +393,8 @@ def list_folder_messages(path: str, fid: str) -> List[dict]:
                 continue
             out.append({
                 "index": i,
-                "subject": (_safe(lambda: m.subject) or "(konusuz)"),
-                "sender": _safe(lambda: m.sender_name),
+                "subject": (_decode_text(_safe(lambda: m.subject)) or "(konusuz)"),
+                "sender": _decode_text(_safe(lambda: m.sender_name)),
                 "date": _fmt_date_short(_message_date(m)),
             })
         return out
@@ -379,6 +411,27 @@ _INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 def _safe_name(name: str, fallback: str = "oge") -> str:
     name = _INVALID.sub("_", (name or "").strip()) or fallback
     return name[:120]
+
+
+#: HTML icindeki kod sayfasi bildirimleri. Govdeyi artik UTF-8 yazdigimiz icin
+#: bu etiketleri de UTF-8'e cevirmezsek istemci eski kod sayfasiyla cozup Turkce
+#: karakterleri bozar.
+_META_CHARSET = re.compile(
+    r'(<meta[^>]*charset=["\']?)([\w\-]+)(["\']?[^>]*>)', re.IGNORECASE)
+_META_HTTP_EQUIV = re.compile(
+    r'(content=["\'][^"\']*charset=)([\w\-]+)', re.IGNORECASE)
+
+
+def _html_to_utf8(html: str) -> str:
+    """HTML govdesindeki charset bildirimlerini UTF-8 yapar (Turkce icin)."""
+    if not html:
+        return html
+    try:
+        html = _META_CHARSET.sub(lambda m: m.group(1) + "utf-8" + m.group(3), html)
+        html = _META_HTTP_EQUIV.sub(lambda m: m.group(1) + "utf-8", html)
+    except Exception:
+        pass
+    return html
 
 
 #: Govde/MIME ile ilgili basliklar - bunlari KENDIMIZ uretecegimiz icin
@@ -448,7 +501,7 @@ def _build_eml(msg: Message) -> bytes:
 
     if msg.html_body:
         eml.set_content(msg.plain_body or " ")
-        eml.add_alternative(msg.html_body, subtype="html")
+        eml.add_alternative(_html_to_utf8(msg.html_body), subtype="html")
     else:
         eml.set_content(msg.plain_body or " ")
 
