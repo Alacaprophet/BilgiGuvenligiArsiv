@@ -68,6 +68,7 @@ class App(ttk.Frame):
         self._queue: "queue.Queue[tuple]" = queue.Queue()
         self._busy = False
         self._stores: list = []
+        self._last_out_dir: str = ""   # gunlugu kaydetmek icin son hedef klasor
 
         # --- OST secim agaci durumu ---
         self._current_ost: str = ""          # yuklu OST yolu
@@ -615,6 +616,7 @@ class App(ttk.Frame):
             fn = core.file_to_eml
 
         fn = functools.partial(fn, selection=selection)
+        self._last_out_dir = out_dir
         self._log(f"Cikti: {dst}")
         self._start(fn, src, dst)
 
@@ -633,6 +635,7 @@ class App(ttk.Frame):
         store = self._stores[idx]
         base = _safe_name(getattr(store, "name", "posta_kutusu"), "posta_kutusu")
         dst = _unique_path(os.path.join(out_dir, base + ".pst"))
+        self._last_out_dir = out_dir
         self._log(f"Cikti: {dst}")
         self._start(core.mailbox_to_pst, store.store_id, dst)
 
@@ -698,15 +701,36 @@ class App(ttk.Frame):
         self.var_status.set("Tamamlandi.")
         self._set_busy(False)
         self._log(f"BASARILI -> {result}")
+        log_path = self._save_log()
+        extra = f"\n\nAyrintili gunluk:\n{log_path}" if log_path else ""
         messagebox.showinfo(
-            APP_TITLE, f"Donusum tamamlandi.\n\nCikti:\n{result}"
+            APP_TITLE, f"Donusum tamamlandi.\n\nCikti:\n{result}{extra}"
         )
 
     def _on_error(self, msg: str) -> None:
         self.var_status.set("Hata.")
         self._set_busy(False)
         self._log("HATA: " + msg)
-        messagebox.showerror(APP_TITLE, msg)
+        log_path = self._save_log()
+        extra = f"\n\nAyrintili gunluk kaydedildi:\n{log_path}" if log_path else ""
+        messagebox.showerror(APP_TITLE, msg + extra)
+
+    def _save_log(self) -> str:
+        """Durum gunlugunu hedef klasore yazar; teshis icin paylasilabilir.
+
+        Donus: yazilan dosyanin yolu (yazilamadiysa bos metin).
+        """
+        out_dir = self._last_out_dir
+        if not out_dir or not os.path.isdir(out_dir):
+            return ""
+        try:
+            content = self.log.get("1.0", "end")
+            path = os.path.join(out_dir, "donusum-gunlugu.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            return path
+        except Exception:
+            return ""
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy

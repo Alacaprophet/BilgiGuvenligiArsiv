@@ -149,6 +149,27 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
             ost_path, tmp_dir, selection, stage1, short_names=True
         )
 
+        # TESHIS: 1. asama gercekte kac .eml uretti? Bu tek sayi, bos PST'nin
+        # sebebini kesinlestirir (okuma mi, yazma mi).
+        n_eml = 0
+        for _root, _dirs, _files in os.walk(tmp_dir):
+            n_eml += sum(1 for x in _files if x.lower().endswith(".eml"))
+        report(f"Asama 1 bitti: {n_eml}/{total} e-posta gecici olarak cikarildi.",
+               0.5)
+        if n_eml == 0:
+            raise ConversionError(
+                "OST'nin klasor listesi okundu (%d mesaj gorundu) ANCAK mesaj "
+                "GOVDELERI cikarilamadi: 0 e-posta yazildi.\n\n"
+                "Bu genellikle su demektir:\n"
+                "  - OST su anda Outlook tarafindan aktif/kilitli kullaniliyor, "
+                "veya\n"
+                "  - bu OST bicimini libpff dogrudan okuyamiyor.\n\n"
+                "COZUM: Outlook'ta TANIMLI bu hesap icin 2. sekme "
+                "'Posta Kutusu -> PST'yi kullanin. O yontem dosyayi degil, "
+                "Outlook'un kendisini okur; kilit/bicim sorunu yasanmaz ve "
+                "icerigi tam aktarir." % total
+            )
+
         report("Asama 2/2: Outlook ile PST olusturuluyor...", 0.5)
 
         def stage2(m: str, f: float) -> None:
