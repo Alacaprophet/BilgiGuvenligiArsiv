@@ -120,6 +120,38 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
         if progress:
             progress(m, f)
 
+    # --- En guvenilir yol: OST, Outlook'ta TANIMLI bir hesabin dosyasi mi? ---
+    # Oyleyse .eml/OpenSharedItem yoluna HIC girmeyiz (bu yol, .eml dosya
+    # iliskisi olmayan makinelerde -ozellikle Windows Server- calismaz). Bunun
+    # yerine Outlook'tan klasorleri DOGRUDAN kopyalariz (CopyTo): kilit sorunu
+    # olmaz, tam sadakatlidir ve .eml gerektirmez.
+    matched_store_id = None
+    try:
+        norm_ost = os.path.normpath(os.path.abspath(ost_path)).lower()
+        for st in engine_outlook.list_stores():
+            fp = getattr(st, "file_path", "") or ""
+            if fp and os.path.normpath(os.path.abspath(fp)).lower() == norm_ost:
+                matched_store_id = st.store_id
+                break
+    except Exception:
+        matched_store_id = None
+
+    if matched_store_id:
+        report(
+            "Bu OST, Outlook'ta tanimli bir hesaba ait. .eml araadimi olmadan, "
+            "en guvenilir yontemle (dogrudan kopyalama) aktariliyor. Not: bu "
+            "modda tum klasorler kopyalanir (klasor secimi uygulanmaz).",
+            -1.0,
+        )
+        try:
+            return engine_outlook.convert_store_to_pst(
+                matched_store_id, pst_path, progress
+            )
+        except ConversionError:
+            raise
+        except Exception as exc:
+            raise ConversionError(_friendly_error(str(exc))) from exc
+
     # Toplam mesaj sayisini (govde okumadan) hesapla. Ayni zamanda dosyanin
     # acilabilir (kilitli degil) oldugunu DOGRULAR; kilitliyse bos PST uretmeden
     # anlasilir bir hata veririz.
