@@ -502,6 +502,42 @@ _PR_DISPLAY_CC = "http://schemas.microsoft.com/mapi/proptag/0x0E03001F"
 _PR_HEADERS = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
 
 
+def _add_existing_pst_store(ns, pst_path: str):
+    """Var olan bir PST'yi (yeniden) acar ve store nesnesini dondurur."""
+    before = set()
+    for i in range(1, ns.Stores.Count + 1):
+        try:
+            before.add(ns.Stores.Item(i).StoreID)
+        except Exception:
+            continue
+    ns.AddStoreEx(pst_path, OL_STORE_UNICODE)  # var olan dosyayi acar
+    for i in range(1, ns.Stores.Count + 1):
+        st = ns.Stores.Item(i)
+        try:
+            if (st.FilePath or "").lower() == pst_path.lower():
+                return st
+        except Exception:
+            continue
+    for i in range(1, ns.Stores.Count + 1):
+        st = ns.Stores.Item(i)
+        try:
+            if st.StoreID not in before:
+                return st
+        except Exception:
+            continue
+    raise RuntimeError("PST yeniden acilamadi.")
+
+
+# Outlook COM baglantisinin koptugunu gosteren HRESULT kodlari.
+_DISCONNECT_CODES = {
+    -2147417848,  # RPC_E_DISCONNECTED: cagrilan nesne istemcilerinden ayrildi
+    -2147023174,  # RPC_S_SERVER_UNAVAILABLE: RPC sunucusu kullanilamiyor
+    -2147023169,  # RPC_S_SERVER_TOO_BUSY / fatal
+    -2147023170,  # RPC_S_CALL_FAILED benzeri
+    -2146959355,  # CO_E_SERVER_EXEC_FAILURE: Outlook baslatilamadi
+}
+
+
 @_with_com
 def import_messages_to_pst(
     pst_path: str,
@@ -515,10 +551,16 @@ def import_messages_to_pst(
     iliskisi olmayan makinelerde (Windows Server vb.) de calisir. Yalnizca
     Outlook'un kurulu olmasini gerektirir.
 
-    ``message_source`` : ``(chain, Message)`` ureten yineleyici. ``chain`` kok->
-        klasor gercek ad demeti; ``Message`` engine_libpff'in modelidir.
+    Cok sayida oge (on binlerce) olustururken Outlook surecinin cokmesine karsi
+    DAYANIKLIDIR: baglanti koparsa otomatik yeniden baglanir, PST'yi yeniden acar
+    ve kaldigi yerden devam eder. Ayrica bellegi sismekten korumak icin periyodik
+    olarak PST'yi diske yazip yeniden acar.
+
+    ``message_source`` : ``(chain, Message)`` ureten yineleyici.
     """
     import re as _re
+    import gc as _gc
+    import time as _time
     import tempfile as _tempfile
     import datetime as _dt
     from email.parser import Parser as _Parser
@@ -532,18 +574,63 @@ def import_messages_to_pst(
             progress(msg, frac)
 
     pst_path = _prepare_pst_path(pst_path)
-    ns = _namespace()
-    report("Hedef PST dosyasi olusturuluyor...", 0.0)
-    dest_store, actual_path = _create_pst_store(ns, pst_path, report)
-    dest_root = dest_store.GetRootFolder()
-
     total = max(1, int(total))
     done = 0
     fail = 0
     fail_logged = 0
     step = max(25, total // 200)
+    FLUSH_EVERY = 500  # bu kadar mesajda bir PST'yi diske yaz + yeniden ac
 
-    def get_or_create(parent, name: str):
+    state = {"ns": None, "root": None, "path": pst_path}
+    folder_cache = {}
+
+    def _connect(create):
+        ns2 = _namespace()
+        if create:
+            store, actual = _create_pst_store(ns2, pst_path, report)
+        else:
+            store = _add_existing_pst_store(ns2, pst_path)
+            try:
+                actual = store.FilePath or pst_path
+            except Exception:
+                actual = pst_path
+        state["ns"] = ns2
+        state["root"] = store.GetRootFolder()
+        state["path"] = actual
+        folder_cache.clear()
+        folder_cache[()] = state["root"]
+        return actual
+
+    def _reconnect():
+        for attempt in range(6):
+            try:
+                _time.sleep(min(2 * (attempt + 1), 10))
+                _connect(create=False)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _flush_reopen():
+        # PST'yi diske yaz (kapat) ve yeniden ac -> Outlook bellegi serbest kalir.
+        try:
+            state["ns"].RemoveStore(state["root"])
+        except Exception:
+            pass
+        _gc.collect()
+        try:
+            _connect(create=False)
+            return True
+        except Exception:
+            return _reconnect()
+
+    def _is_disconnect(exc):
+        try:
+            return bool(exc.args) and exc.args[0] in _DISCONNECT_CODES
+        except Exception:
+            return False
+
+    def get_or_create(parent, name):
         for i in range(1, parent.Folders.Count + 1):
             try:
                 if parent.Folders.Item(i).Name == name:
@@ -551,8 +638,6 @@ def import_messages_to_pst(
             except Exception:
                 continue
         return parent.Folders.Add(name)
-
-    folder_cache = {(): dest_root}
 
     def folder_for(chain):
         if chain in folder_cache:
@@ -569,91 +654,126 @@ def import_messages_to_pst(
         return name[:120]
 
     att_dir = _tempfile.mkdtemp(prefix="ost2pst_att_")
+
+    def _write_one(chain, msg):
+        folder = folder_for(tuple(chain))
+        item = folder.Items.Add("IPM.Note")
+        item.Subject = getattr(msg, "subject", "") or "(konusuz)"
+
+        html = getattr(msg, "html_body", "") or ""
+        if html:
+            try:
+                item.HTMLBody = html
+            except Exception:
+                item.Body = getattr(msg, "plain_body", "") or ""
+        else:
+            item.Body = getattr(msg, "plain_body", "") or ""
+
+        to = cc = from_disp = ""
+        headers = getattr(msg, "headers", "") or ""
+        if headers:
+            try:
+                p = _Parser(policy=_default_policy).parsestr(headers, headersonly=True)
+                to = p.get("To", "") or ""
+                cc = p.get("Cc", "") or ""
+                from_disp = p.get("From", "") or ""
+            except Exception:
+                pass
+
+        pa = item.PropertyAccessor
+
+        def setp(tag, val):
+            try:
+                pa.SetProperty(tag, val)
+            except Exception:
+                pass
+
+        sender = getattr(msg, "sender_name", "") or from_disp
+        if sender:
+            setp(_PR_SENDER_NAME, sender)
+            setp(_PR_SENT_REPR_NAME, sender)
+        if to:
+            setp(_PR_DISPLAY_TO, to)
+        if cc:
+            setp(_PR_DISPLAY_CC, cc)
+        if headers:
+            setp(_PR_HEADERS, headers)
+        d = getattr(msg, "date", None)
+        if isinstance(d, _dt.datetime):
+            setp(_PR_DELIVERY_TIME, d)
+            setp(_PR_SUBMIT_TIME, d)
+
+        for idx, att in enumerate(getattr(msg, "attachments", []) or []):
+            try:
+                pth = os.path.join(att_dir, _att_name(att.name, idx))
+                with open(pth, "wb") as fh:
+                    fh.write(att.data or b"")
+                item.Attachments.Add(pth)
+                try:
+                    os.remove(pth)
+                except Exception:
+                    pass
+            except Exception:
+                continue
+
+        item.Save()
+
+    report("Hedef PST dosyasi olusturuluyor...", 0.0)
+    actual_path = _connect(create=True)
     report("Aktariliyor...", 0.0)
+    aborted = False
     try:
         for chain, msg in message_source:
+            ok = False
             try:
-                folder = folder_for(tuple(chain))
-                item = folder.Items.Add("IPM.Note")
-                item.Subject = getattr(msg, "subject", "") or "(konusuz)"
-
-                html = getattr(msg, "html_body", "") or ""
-                if html:
-                    try:
-                        item.HTMLBody = html
-                    except Exception:
-                        item.Body = getattr(msg, "plain_body", "") or ""
-                else:
-                    item.Body = getattr(msg, "plain_body", "") or ""
-
-                # Basliklardan alici/gonderen bilgisi (varsa).
-                to = cc = from_disp = ""
-                headers = getattr(msg, "headers", "") or ""
-                if headers:
-                    try:
-                        p = _Parser(policy=_default_policy).parsestr(
-                            headers, headersonly=True)
-                        to = p.get("To", "") or ""
-                        cc = p.get("Cc", "") or ""
-                        from_disp = p.get("From", "") or ""
-                    except Exception:
-                        pass
-
-                pa = item.PropertyAccessor
-
-                def setp(tag, val):
-                    try:
-                        pa.SetProperty(tag, val)
-                    except Exception:
-                        pass
-
-                sender = getattr(msg, "sender_name", "") or from_disp
-                if sender:
-                    setp(_PR_SENDER_NAME, sender)
-                    setp(_PR_SENT_REPR_NAME, sender)
-                if to:
-                    setp(_PR_DISPLAY_TO, to)
-                if cc:
-                    setp(_PR_DISPLAY_CC, cc)
-                if headers:
-                    setp(_PR_HEADERS, headers)
-                d = getattr(msg, "date", None)
-                if isinstance(d, _dt.datetime):
-                    setp(_PR_DELIVERY_TIME, d)
-                    setp(_PR_SUBMIT_TIME, d)
-
-                for idx, att in enumerate(getattr(msg, "attachments", []) or []):
-                    try:
-                        pth = os.path.join(att_dir, _att_name(att.name, idx))
-                        with open(pth, "wb") as fh:
-                            fh.write(att.data or b"")
-                        item.Attachments.Add(pth)
+                _write_one(chain, msg)
+                ok = True
+            except Exception as exc:
+                if _is_disconnect(exc):
+                    report("  ! Outlook baglantisi koptu; yeniden baglaniliyor...")
+                    if _reconnect():
                         try:
-                            os.remove(pth)
+                            _write_one(chain, msg)  # taze baglantida bir kez dene
+                            ok = True
                         except Exception:
-                            pass
-                    except Exception:
-                        continue
-
-                item.Save()
-            except Exception as exc:  # pragma: no cover - Outlook'a bagli
+                            ok = False  # bu mesaj sorunlu; atla
+                    else:
+                        report("  ! Outlook'a yeniden baglanilamadi; kalan "
+                               "mesajlar atlandi.")
+                        aborted = True
+                        break
+                else:
+                    ok = False
+            if not ok:
                 fail += 1
                 if fail_logged < 15:
                     fail_logged += 1
-                    report(f"  ! Mesaj yazilamadi: {exc}")
+                    try:
+                        emsg = str(exc)
+                    except Exception:
+                        emsg = "?"
+                    report(f"  ! Mesaj yazilamadi: {emsg}")
                 elif fail_logged == 15:
                     fail_logged += 1
                     report("  ! (daha fazla yazilamayan oge sessizce gecilecek)")
             done += 1
             if done % step == 0 or done >= total:
                 report(f"{done}/{total} mesaj PST'ye yazildi", min(1.0, done / total))
+            if done % 250 == 0:
+                _gc.collect()  # COM nesnelerini serbest birak (Outlook'u rahatlatir)
+            if done % FLUSH_EVERY == 0:
+                report("  (ara kayit: PST diske yaziliyor...)")
+                if not _flush_reopen():
+                    report("  ! Yeniden acilamadi; kalan mesajlar atlandi.")
+                    aborted = True
+                    break
     finally:
         import shutil as _shutil
         _shutil.rmtree(att_dir, ignore_errors=True)
 
     report("PST dosyasi kapatiliyor...", 0.99)
     try:
-        ns.RemoveStore(dest_root)
+        state["ns"].RemoveStore(state["root"])
     except Exception:
         pass
 
@@ -665,14 +785,16 @@ def import_messages_to_pst(
         except Exception:
             pass
         raise RuntimeError(
-            "Hicbir mesaj PST'ye yazilamadi. Outlook mesaj olusturmayi reddetti. "
-            "Outlook'un acik/calisir oldugundan emin olun."
+            "Hicbir mesaj PST'ye yazilamadi. Outlook mesaj olusturmayi reddetti "
+            "veya surekli cokuyor."
         )
 
+    tail = " (islem yarida kesildi)" if aborted else ""
     if fail:
-        report(f"Bitti. {success}/{total} mesaj yazildi, {fail} oge atlandi.", 1.0)
+        report(f"Bitti. {success}/{total} mesaj yazildi, {fail} oge atlandi.{tail}",
+               1.0)
     else:
-        report("Bitti.", 1.0)
+        report(f"Bitti. {success} mesaj.{tail}", 1.0)
     return actual_path
 
 
