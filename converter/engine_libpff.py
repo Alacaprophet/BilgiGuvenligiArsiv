@@ -1011,7 +1011,6 @@ def export_selected_eml(
                 pass
 
         stopped = False
-        dumped = False
         for fid, sel in selection.items():
             if cancel is not None and cancel.is_set():
                 stopped = True
@@ -1030,18 +1029,7 @@ def export_selected_eml(
                     break
                 label = "oge %d" % (i + 1)
                 try:
-                    pff_m = folder.get_sub_message(i)
-                    if not dumped:
-                        # TESHIS: ilk mesaj icin pypff'in sundugu tum alanlari yaz.
-                        dumped = True
-                        try:
-                            with open(os.path.join(out_dir,
-                                      "_teshis_ilk_mesaj.txt"), "w",
-                                      encoding="utf-8") as dfh:
-                                dfh.write(dump_message_debug(pff_m))
-                        except Exception:
-                            pass
-                    msg = _read_message(pff_m)
+                    msg = _read_message(folder.get_sub_message(i))
                     if short_names:
                         fname = "%05d.eml" % (i + 1)
                     else:

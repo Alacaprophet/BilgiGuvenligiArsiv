@@ -409,6 +409,7 @@ def import_eml_tree_to_pst(
     import tempfile as _tempfile
     from email import policy as _email_policy
     from email.utils import parsedate_to_datetime as _parsedate
+    from email.utils import getaddresses as _getaddresses
 
     if not is_available():
         raise RuntimeError("Outlook / pywin32 bu makinede bulunamadi.")
@@ -509,6 +510,40 @@ def import_eml_tree_to_pst(
     _bad = _re.compile(r'[<>:"/\\|?*\x00-\x1f]')
     att_dir = _tempfile.mkdtemp(prefix="ost2pst_att_")
 
+    def _apply_recipients(item, em):
+        """EML To/Cc basliklarini Outlook ogesine GERCEK alici olarak ekler.
+
+        Kime/CC alaninin Outlook'ta gorunmesi icin recipient koleksiyonuna eklemek
+        sarttir (PR_DISPLAY_TO tek basina gormez). Adres yoksa goruntu adi eklenir
+        (cozumlemeye calismayiz; ad olarak gorunur).
+        """
+        try:
+            if item.Recipients.Count > 0:
+                return  # zaten alici var (OpenSharedItem eklemis)
+        except Exception:
+            pass
+
+        def add(header, rtype):
+            try:
+                pairs = _getaddresses(em.get_all(header, []) or [])
+            except Exception:
+                pairs = []
+            for name, addr in pairs:
+                disp = (addr or name or "").strip()
+                if not disp:
+                    continue
+                try:
+                    r = item.Recipients.Add(disp)
+                    try:
+                        r.Type = rtype
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+
+        add("To", 1)   # olTo
+        add("Cc", 2)   # olCC
+
     def _direct_from_eml(folder, path):
         """OpenSharedItem calismadiginda: .eml'i ayristirip mesaji dogrudan kur."""
         with open(path, "rb") as fh:
@@ -576,13 +611,14 @@ def import_eml_tree_to_pst(
                     pass
             except Exception:
                 continue
+        _apply_recipients(item, em)   # Kime/CC gorunur olsun
         item.Save()
         _finalize_item(item, folder)
 
     def _write_one(rel, full):
         folder = folder_for_rel(rel)
         # 1) TAM SADAKAT: Outlook'un kendi .eml ice-aktaricisi tum basliklari
-        #    (From/To/Cc/Date), govdeyi ve ekleri dogru ayristirir; mesaj normal
+        #    (From/Date), govdeyi ve ekleri dogru ayristirir; mesaj normal
         #    (taslak degil) gelir. Sonra hedef PST klasorune Move ederiz.
         try:
             it = state["ns"].OpenSharedItem(full)
@@ -593,7 +629,9 @@ def import_eml_tree_to_pst(
             _direct_from_eml(folder, full)
             return
         try:
-            it.Move(folder)
+            moved = it.Move(folder)
+            if moved is not None:
+                it = moved
         except Exception as exc:
             if _is_disconnect(exc):
                 raise
@@ -602,6 +640,23 @@ def import_eml_tree_to_pst(
             except Exception:
                 pass
             _ensure_in_folder(it, folder)
+        # OpenSharedItem Kime/CC'yi (adres SMTP degilse) tasimayabilir; bos ise
+        # EML basliklarindan gercek alici olarak ekle.
+        try:
+            need = False
+            try:
+                need = (it.Recipients.Count == 0)
+            except Exception:
+                need = True
+            if need:
+                with open(full, "rb") as fh:
+                    em2 = _email.message_from_binary_file(
+                        fh, policy=_email_policy.default)
+                _apply_recipients(it, em2)
+                it.Save()
+        except Exception as exc:
+            if _is_disconnect(exc):
+                raise
 
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
     actual_path = _connect(create=True)
