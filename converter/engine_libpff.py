@@ -474,19 +474,21 @@ def _build_eml(msg: Message) -> bytes:
     eml = EmailMessage()
 
     if msg.headers.strip():
-        # Orijinal aciklayici basliklari (From/To/Subject/Date...) koru;
-        # govde/MIME basliklarini atla (govdeyi biz kuracagiz).
+        # Orijinal aciklayici basliklari (From/To/Date...) koru; govde/MIME
+        # basliklarini VE Subject'i atla. Subject'i libpff'in temiz (dogru
+        # cozulmus) degerinden kuracagiz; ham basliktaki Konu bozuk kodlanmis
+        # olabilir ve Outlook'ta yanlis gorunur.
         parsed = Parser(policy=default_policy).parsestr(msg.headers, headersonly=True)
         for key, value in parsed.items():
-            if key.lower() in _SKIP_HEADERS:
+            if key.lower() in _SKIP_HEADERS or key.lower() == "subject":
                 continue
             try:
                 eml[key] = value
             except Exception:
                 continue
 
-    if "Subject" not in eml:
-        eml["Subject"] = msg.subject or "(konusuz)"
+    # Konu: her zaman libpff'in temiz degerinden (RFC2047 utf-8 olarak yazilir).
+    eml["Subject"] = msg.subject or "(konusuz)"
     if "From" not in eml and msg.sender_name:
         try:
             eml["From"] = msg.sender_name
