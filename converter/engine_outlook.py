@@ -510,6 +510,21 @@ def import_eml_tree_to_pst(
     _bad = _re.compile(r'[<>:"/\\|?*\x00-\x1f]')
     att_dir = _tempfile.mkdtemp(prefix="ost2pst_att_")
 
+    dbg_count = [0]
+
+    def _dbg(msg):
+        if dbg_count[0] < 4:
+            report("[TESHIS] " + msg)
+
+    def _safe_attr(obj, path):
+        try:
+            cur = obj
+            for part in path.split("."):
+                cur = getattr(cur, part)
+            return cur
+        except Exception:
+            return "?"
+
     def _apply_recipients(item, em):
         """EML To/Cc basliklarini Outlook ogesine GERCEK alici olarak ekler.
 
@@ -561,15 +576,17 @@ def import_eml_tree_to_pst(
             if to:
                 try:
                     pa.SetProperty(_PR_DISPLAY_TO, to)
-                except Exception:
-                    pass
+                    _dbg("SetProperty DISPLAY_TO OK (to=%r)" % to[:60])
+                except Exception as e:
+                    _dbg("SetProperty DISPLAY_TO HATA: %s" % e)
             if cc:
                 try:
                     pa.SetProperty(_PR_DISPLAY_CC, cc)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                    _dbg("SetProperty DISPLAY_CC OK")
+                except Exception as e:
+                    _dbg("SetProperty DISPLAY_CC HATA: %s" % e)
+        except Exception as e:
+            _dbg("PropertyAccessor HATA: %s" % e)
 
     def _direct_from_eml(folder, path):
         """OpenSharedItem calismadiginda: .eml'i ayristirip mesaji dogrudan kur."""
@@ -647,7 +664,9 @@ def import_eml_tree_to_pst(
             if _is_disconnect(exc):
                 raise
             # .eml dosya iliskisi yok -> dusuk sadakatli dogrudan olusturmaya dus.
+            _dbg("OpenSharedItem BASARISIZ (%s) -> dogrudan olusturma" % exc)
             _direct_from_eml(folder, full)
+            dbg_count[0] += 1
             return
         try:
             moved = it.Move(folder)
@@ -667,8 +686,25 @@ def import_eml_tree_to_pst(
             with open(full, "rb") as fh:
                 em2 = _email.message_from_binary_file(
                     fh, policy=_email_policy.default)
+            if dbg_count[0] < 4:
+                try:
+                    _dbg("OpenSharedItem OK | import sonrasi To=%r CC=%r Recip=%s "
+                         "| EML To=%r" % (
+                             getattr(it, "To", "?"), getattr(it, "CC", "?"),
+                             _safe_attr(it, "Recipients.Count"),
+                             (em2.get("To") or "")[:60]))
+                except Exception as e:
+                    _dbg("readback hata: %s" % e)
             _force_display_recipients(it, em2)
             it.Save()
+            if dbg_count[0] < 4:
+                try:
+                    _dbg("force sonrasi To=%r Recip=%s" % (
+                        getattr(it, "To", "?"),
+                        _safe_attr(it, "Recipients.Count")))
+                except Exception:
+                    pass
+            dbg_count[0] += 1
         except Exception as exc:
             if _is_disconnect(exc):
                 raise
