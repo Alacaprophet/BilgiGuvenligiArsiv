@@ -196,6 +196,55 @@ def _entry_to_text(entry) -> str:
         return ""
 
 
+def dump_message_debug(pff_msg) -> str:
+    """Teshis: pypff'in bir mesaj icin sundugu tum alanlari/MAPI ozelliklerini
+    metin olarak dokumler. Alici (To/Cc) verisinin nerede oldugunu bulmak icin."""
+    lines = []
+    try:
+        attrs = sorted(d for d in dir(pff_msg) if not d.startswith("__"))
+        lines.append("=== dir(message) ===")
+        lines.append(", ".join(attrs))
+    except Exception as e:
+        lines.append("dir hata: %s" % e)
+    lines.append("")
+    lines.append("number_of_recipients: %r"
+                 % _safe(lambda: pff_msg.number_of_recipients, "<YOK>"))
+    lines.append("get_number_of_recipients: %r"
+                 % _safe(lambda: pff_msg.get_number_of_recipients(), "<YOK>"))
+    lines.append("number_of_record_sets: %r"
+                 % _safe(lambda: pff_msg.number_of_record_sets, "<YOK>"))
+    lines.append("sender_name: %r" % _safe(lambda: pff_msg.sender_name, ""))
+    lines.append("transport_headers (ilk 200):")
+    th = _safe(lambda: pff_msg.transport_headers, "")
+    if isinstance(th, bytes):
+        th = _decode_text(th)
+    lines.append((th or "<bos>")[:200])
+    lines.append("")
+    # Tum record set girdileri (entry_type / value_type / kisa deger)
+    n = _safe(lambda: pff_msg.number_of_record_sets, 0) or 0
+    lines.append("=== record sets (%d) ===" % n)
+    for i in range(n):
+        rs = _safe(lambda i=i: pff_msg.get_record_set(i), None)
+        if rs is None:
+            continue
+        ne = _safe(lambda: rs.number_of_entries, 0) or 0
+        lines.append("-- record_set %d: %d entries --" % (i, ne))
+        for j in range(ne):
+            e = _safe(lambda j=j: rs.get_entry(j), None)
+            if e is None:
+                continue
+            et = _safe(lambda: e.entry_type, None)
+            vt = _safe(lambda: e.value_type, None)
+            try:
+                val = (_entry_to_text(e) or "")[:90]
+            except Exception:
+                val = ""
+            ets = ("0x%04X" % et) if isinstance(et, int) else repr(et)
+            vts = ("0x%04X" % vt) if isinstance(vt, int) else repr(vt)
+            lines.append("  %s vt=%s : %s" % (ets, vts, val))
+    return "\n".join(lines)
+
+
 def _record_props(item, wanted) -> dict:
     """pypff item'in record set'lerinden istenen proptag'lerin metnini dondurur.
 
@@ -962,6 +1011,7 @@ def export_selected_eml(
                 pass
 
         stopped = False
+        dumped = False
         for fid, sel in selection.items():
             if cancel is not None and cancel.is_set():
                 stopped = True
@@ -980,7 +1030,18 @@ def export_selected_eml(
                     break
                 label = "oge %d" % (i + 1)
                 try:
-                    msg = _read_message(folder.get_sub_message(i))
+                    pff_m = folder.get_sub_message(i)
+                    if not dumped:
+                        # TESHIS: ilk mesaj icin pypff'in sundugu tum alanlari yaz.
+                        dumped = True
+                        try:
+                            with open(os.path.join(out_dir,
+                                      "_teshis_ilk_mesaj.txt"), "w",
+                                      encoding="utf-8") as dfh:
+                                dfh.write(dump_message_debug(pff_m))
+                        except Exception:
+                            pass
+                    msg = _read_message(pff_m)
                     if short_names:
                         fname = "%05d.eml" % (i + 1)
                     else:
