@@ -105,14 +105,16 @@ def list_ost_folder_messages(ost_path: str, folder_id: str) -> List[dict]:
 # --------------------------------------------------------------------------- #
 # 1) Bagli posta kutusu (OST onbellegi) -> PST   (tam sadakat, en guvenilir)
 # --------------------------------------------------------------------------- #
-def mailbox_to_pst(store_id: str, pst_path: str, progress: Progress = None) -> str:
+def mailbox_to_pst(store_id: str, pst_path: str, progress: Progress = None,
+                   cancel=None) -> str:
     if not engine_outlook.is_available():
         raise ConversionError(
             "Bu islem icin Windows uzerinde Microsoft Outlook ve pywin32 "
             "gereklidir. ('pip install pywin32')"
         )
     try:
-        return engine_outlook.convert_store_to_pst(store_id, pst_path, progress)
+        return engine_outlook.convert_store_to_pst(store_id, pst_path, progress,
+                                                   cancel=cancel)
     except ConversionError:
         raise
     except Exception as exc:
@@ -124,7 +126,7 @@ def mailbox_to_pst(store_id: str, pst_path: str, progress: Progress = None) -> s
 #    libpff ile okunur, Outlook ile gercek PST'ye yazilir.
 # --------------------------------------------------------------------------- #
 def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
-                selection: Optional[Dict] = None) -> str:
+                selection: Optional[Dict] = None, cancel=None) -> str:
     if not engine_libpff.is_available():
         raise ConversionError(
             "OST dosyasini okumak icin libpff gereklidir. "
@@ -165,7 +167,7 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
         )
         try:
             return engine_outlook.convert_store_to_pst(
-                matched_store_id, pst_path, progress
+                matched_store_id, pst_path, progress, cancel=cancel
             )
         except ConversionError:
             raise
@@ -192,7 +194,7 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
     try:
         msg_iter = engine_libpff.iter_selected_messages(ost_path, selection)
         return engine_outlook.import_messages_to_pst(
-            pst_path, msg_iter, total, progress
+            pst_path, msg_iter, total, progress, cancel=cancel
         )
     except ConversionError:
         raise
@@ -201,7 +203,7 @@ def file_to_pst(ost_path: str, pst_path: str, progress: Progress = None,
 
 
 def file_to_pst_via_eml(ost_path: str, pst_path: str, progress: Progress = None,
-                        selection: Optional[Dict] = None) -> str:
+                        selection: Optional[Dict] = None, cancel=None) -> str:
     """Secimi once .eml agacina cikarir, sonra Outlook ile PST'ye AKTARIR.
 
     Kullanicinin istedigi 'EML uzerinden' akis: secilen mesajlar gecici bir
@@ -230,7 +232,7 @@ def file_to_pst_via_eml(ost_path: str, pst_path: str, progress: Progress = None,
             report(m, (f * 0.5) if f >= 0 else f)
 
         engine_libpff.export_selected_eml(
-            ost_path, tmp_dir, selection, stage1, short_names=True
+            ost_path, tmp_dir, selection, stage1, short_names=True, cancel=cancel
         )
 
         n_eml = 0
@@ -245,32 +247,35 @@ def file_to_pst_via_eml(ost_path: str, pst_path: str, progress: Progress = None,
         def stage2(m: str, f: float) -> None:
             report(m, (0.5 + f * 0.5) if f >= 0 else f)
 
-        return engine_outlook.import_eml_tree_to_pst(tmp_dir, pst_path, stage2)
+        return engine_outlook.import_eml_tree_to_pst(tmp_dir, pst_path, stage2,
+                                                     cancel=cancel)
     except ConversionError:
         raise
     except Exception as exc:
         raise ConversionError(_friendly_error(str(exc))) from exc
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def file_to_eml(ost_path: str, out_dir: str, progress: Progress = None,
-                selection: Optional[Dict] = None) -> str:
+                selection: Optional[Dict] = None, cancel=None) -> str:
     if not engine_libpff.is_available():
         raise ConversionError("libpff gerekli. ('pip install libpff-python')")
     try:
         return engine_libpff.export_selected_eml(
-            ost_path, out_dir, selection, progress
+            ost_path, out_dir, selection, progress, cancel=cancel
         )
     except Exception as exc:
         raise ConversionError(_friendly_error(str(exc))) from exc
 
 
 def file_to_mbox(ost_path: str, mbox_path: str, progress: Progress = None,
-                 selection: Optional[Dict] = None) -> str:
+                 selection: Optional[Dict] = None, cancel=None) -> str:
     if not engine_libpff.is_available():
         raise ConversionError("libpff gerekli. ('pip install libpff-python')")
     try:
         return engine_libpff.export_selected_mbox(
-            ost_path, mbox_path, selection, progress
+            ost_path, mbox_path, selection, progress, cancel=cancel
         )
     except Exception as exc:
         raise ConversionError(_friendly_error(str(exc))) from exc

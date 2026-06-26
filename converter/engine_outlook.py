@@ -282,6 +282,7 @@ def convert_store_to_pst(
     store_id: str,
     pst_path: str,
     progress: Optional[Callable[[str, float], None]] = None,
+    cancel=None,
 ) -> str:
     """Secilen store'u (OST onbellegi) yeni bir PST dosyasina kopyalar.
 
@@ -335,6 +336,10 @@ def convert_store_to_pst(
 
     copied = 0
     for idx, folder in enumerate(top_folders, start=1):
+        if cancel is not None and cancel.is_set():
+            report("Durduruldu (kullanici). O ana kadar kopyalanan klasorler "
+                   "PST'de kalir.", -1.0)
+            break
         name = folder.Name
         report(f"Kopyalaniyor: {name}", copied / grand_total)
         try:
@@ -368,6 +373,7 @@ def import_eml_tree_to_pst(
     eml_root: str,
     pst_path: str,
     progress: Optional[Callable[[str, float], None]] = None,
+    cancel=None,
 ) -> str:
     """Bir .eml klasor agacini Outlook araciligi ile yeni bir PST'ye aktarir.
 
@@ -573,8 +579,16 @@ def import_eml_tree_to_pst(
     aborted = False
     try:
         for current_dir, _dirs, files in os.walk(eml_root):
+            if cancel is not None and cancel.is_set():
+                report("Durduruldu (kullanici). O ana kadarki mesajlar PST'ye "
+                       "yazildi.")
+                aborted = True
+                break
             rel = os.path.relpath(current_dir, eml_root)
             for fname in files:
+                if cancel is not None and cancel.is_set():
+                    aborted = True
+                    break
                 if fname == FOLDERNAME_FILE or not fname.lower().endswith(".eml"):
                     continue
                 full = os.path.join(current_dir, fname)
@@ -716,6 +730,7 @@ def import_messages_to_pst(
     message_source,
     total: int,
     progress: Optional[Callable[[str, float], None]] = None,
+    cancel=None,
 ) -> str:
     """libpff'ten okunan mesajlari Outlook'ta DOGRUDAN olusturup PST'ye yazar.
 
@@ -896,6 +911,11 @@ def import_messages_to_pst(
     aborted = False
     try:
         for chain, msg in message_source:
+            if cancel is not None and cancel.is_set():
+                report("Durduruldu (kullanici). O ana kadarki mesajlar PST'ye "
+                       "yazildi.")
+                aborted = True
+                break
             ok = False
             try:
                 _write_one(chain, msg)

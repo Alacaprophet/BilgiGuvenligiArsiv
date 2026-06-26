@@ -69,6 +69,7 @@ class App(ttk.Frame):
         self._busy = False
         self._stores: list = []
         self._last_out_dir: str = ""   # gunlugu kaydetmek icin son hedef klasor
+        self._cancel = None            # threading.Event: aktarimi durdurma istegi
 
         # --- OST secim agaci durumu ---
         self._current_ost: str = ""          # yuklu OST yolu
@@ -271,8 +272,14 @@ class App(ttk.Frame):
         # (anlik loglar rahat okunsun).
         self.rowconfigure(2, weight=2)
 
-        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=1.0)
+        top = ttk.Frame(frame)
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(top, mode="determinate", maximum=1.0)
         self.progress.grid(row=0, column=0, sticky="ew")
+        self.btn_stop = ttk.Button(top, text="Durdur", command=self._on_stop,
+                                   state="disabled")
+        self.btn_stop.grid(row=0, column=1, sticky="e", padx=(PAD, 0))
         self.var_status = tk.StringVar(value="Hazir.")
         ttk.Label(frame, textvariable=self.var_status).grid(
             row=1, column=0, sticky="w", pady=(4, 4)
@@ -650,16 +657,19 @@ class App(ttk.Frame):
         self._start(core.mailbox_to_pst, store.store_id, dst)
 
     def _start(self, fn, *args) -> None:
+        self._cancel = threading.Event()
         self._set_busy(True)
         self.progress["value"] = 0
         self.var_status.set("Calisiyor...")
+
+        cancel = self._cancel
 
         def progress(msg: str, frac: float) -> None:
             self._queue.put(("progress", msg, frac))
 
         def worker() -> None:
             try:
-                result = fn(*args, progress=progress)
+                result = fn(*args, progress=progress, cancel=cancel)
                 self._queue.put(("done", result))
             except Exception as exc:  # core.ConversionError dahil
                 self._queue.put(("error", str(exc)))
@@ -757,11 +767,21 @@ class App(ttk.Frame):
         except Exception:
             return ""
 
+    def _on_stop(self) -> None:
+        """Aktarimi durdur: o ana kadar cikarilanlar PST'ye yazilip kapatilir."""
+        if self._busy and self._cancel is not None:
+            self._cancel.set()
+            self.var_status.set("Durduruluyor... (o ana kadarki ogeler yazilacak)")
+            self._log("Durdurma istendi; mevcut oge bitince guvenle kapatilacak.")
+            self.btn_stop.configure(state="disabled")
+
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
         self.btn_mbox_go.configure(state=state)
         self.btn_file_go.configure(state=state)
+        # Durdur butonu yalnizca islem surerken etkin.
+        self.btn_stop.configure(state="normal" if busy else "disabled")
 
     # ------------------------------------------------------------------ #
     # Gunluk

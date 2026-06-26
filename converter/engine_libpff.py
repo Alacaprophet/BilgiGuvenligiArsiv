@@ -748,6 +748,7 @@ def export_selected_eml(
     selection: Optional[Selection] = None,
     progress: Optional[Callable[[str, float], None]] = None,
     short_names: bool = False,
+    cancel=None,
 ) -> str:
     """Secilen klasor/mesajlari, OST yapisini koruyarak .eml olarak yazar.
 
@@ -788,7 +789,11 @@ def export_selected_eml(
             except Exception:
                 pass
 
+        stopped = False
         for fid, sel in selection.items():
+            if cancel is not None and cancel.is_set():
+                stopped = True
+                break
             if fid not in byid:
                 continue
             try:
@@ -798,6 +803,9 @@ def export_selected_eml(
                 continue
             dest = os.path.join(out_dir, relpath[fid])
             for i in _selected_indices(folder, sel):
+                if cancel is not None and cancel.is_set():
+                    stopped = True
+                    break
                 label = "oge %d" % (i + 1)
                 try:
                     msg = _read_message(folder.get_sub_message(i))
@@ -812,7 +820,12 @@ def export_selected_eml(
                 except Exception as exc:
                     prog.failure(label, exc)
                 prog.tick()
+            if stopped:
+                break
 
+        if stopped:
+            prog._emit("Durduruldu (kullanici). O ana kadar cikarilanlar yazildi.",
+                       -1.0)
         prog.finish()
         return out_dir
     finally:
@@ -824,6 +837,7 @@ def export_selected_mbox(
     mbox_path: str,
     selection: Optional[Selection] = None,
     progress: Optional[Callable[[str, float], None]] = None,
+    cancel=None,
 ) -> str:
     """Secilen mesajlari tek bir MBOX dosyasina yazar (yapi duzlestirilir)."""
     import mailbox
@@ -847,7 +861,11 @@ def export_selected_mbox(
             total += byid[fid]["count"] if sel is True else len(sel)
         prog = _Progress(total, progress, verb="yazildi")
 
+        stopped = False
         for fid, sel in selection.items():
+            if cancel is not None and cancel.is_set():
+                stopped = True
+                break
             if fid not in byid:
                 continue
             try:
@@ -855,14 +873,22 @@ def export_selected_mbox(
             except Exception:
                 continue
             for i in _selected_indices(folder, sel):
+                if cancel is not None and cancel.is_set():
+                    stopped = True
+                    break
                 try:
                     msg = _read_message(folder.get_sub_message(i))
                     mbox.add(message_to_eml_bytes(msg))
                 except Exception as exc:
                     prog.failure("oge %d" % (i + 1), exc)
                 prog.tick()
+            if stopped:
+                break
 
         mbox.flush()
+        if stopped:
+            prog._emit("Durduruldu (kullanici). O ana kadar yazilanlar kaydedildi.",
+                       -1.0)
         prog.finish()
         return mbox_path
     finally:
