@@ -577,7 +577,7 @@ def import_eml_tree_to_pst(
             except Exception:
                 continue
         item.Save()
-        _ensure_in_folder(item, folder)
+        _finalize_item(item, folder)
 
     def _write_one(rel, full):
         # NOT: OpenSharedItem KULLANMIYORUZ. O yontem .eml'i once varsayilan
@@ -698,6 +698,33 @@ _PR_SUBMIT_TIME = "http://schemas.microsoft.com/mapi/proptag/0x00390040"
 _PR_DISPLAY_TO = "http://schemas.microsoft.com/mapi/proptag/0x0E04001F"
 _PR_DISPLAY_CC = "http://schemas.microsoft.com/mapi/proptag/0x0E03001F"
 _PR_HEADERS = "http://schemas.microsoft.com/mapi/proptag/0x007D001F"
+_PR_MESSAGE_FLAGS = "http://schemas.microsoft.com/mapi/proptag/0x0E070003"
+
+# Mesaj bayraklari (PR_MESSAGE_FLAGS)
+_MSGFLAG_READ = 0x1
+_MSGFLAG_UNSENT = 0x8  # "taslak" -> bu temizlenince oge normal/gonderilmis gorunur
+
+
+def _finalize_item(item, folder):
+    """Olusturulan ogeyi NORMAL mesaj yapar ve hedef PST klasorune tasir.
+
+    Items.Add ile olusan mail varsayilan olarak 'taslak' (UNSENT) isaretlidir;
+    bu yuzden hem Taslaklar'a yonlenir hem taslak gibi gorunur. UNSENT bayragini
+    temizleyip READ ekleyerek normal/okunmus mesaja ceviririz, sonra hedef
+    klasore tasiriz.
+    """
+    try:
+        pa = item.PropertyAccessor
+        try:
+            flags = int(pa.GetProperty(_PR_MESSAGE_FLAGS))
+        except Exception:
+            flags = 0
+        new_flags = (flags & ~_MSGFLAG_UNSENT) | _MSGFLAG_READ
+        pa.SetProperty(_PR_MESSAGE_FLAGS, new_flags)
+        item.Save()
+    except Exception:
+        pass
+    _ensure_in_folder(item, folder)
 
 
 def _add_existing_pst_store(ns, pst_path: str):
@@ -916,7 +943,7 @@ def import_messages_to_pst(
                 continue
 
         item.Save()
-        _ensure_in_folder(item, folder)
+        _finalize_item(item, folder)
 
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
     actual_path = _connect(create=True)
