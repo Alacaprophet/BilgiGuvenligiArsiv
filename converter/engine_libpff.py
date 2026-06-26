@@ -130,6 +130,38 @@ _TAG_SENT_REPR_EMAIL = 0x0065  # PR_SENT_REPRESENTING_EMAIL_ADDRESS
 _TAG_ATTACH_LONG = 0x3707      # PR_ATTACH_LONG_FILENAME
 _TAG_ATTACH_SHORT = 0x3704     # PR_ATTACH_FILENAME
 _TAG_DISPLAY_NAME = 0x3001     # PR_DISPLAY_NAME
+_TAG_RECEIVED_BY_NAME = 0x0040    # PR_RECEIVED_BY_NAME (gelen mailde alici)
+_TAG_RECEIVED_BY_EMAIL = 0x0076   # PR_RECEIVED_BY_EMAIL_ADDRESS
+
+
+def _read_recipients(pff_msg):
+    """pypff alici tablosundan (varsa) To/Cc dizgelerini kurar.
+
+    Bazi pypff surumleri recipient API sunar; sunmuyorsa ('') doner ve cagiran
+    diger kaynaklara (PR_DISPLAY_TO vb.) duser.
+    """
+    tos, ccs = [], []
+    n = _safe(lambda: pff_msg.number_of_recipients, 0) or 0
+    for i in range(n):
+        r = _safe(lambda i=i: pff_msg.get_recipient(i), None)
+        if r is None:
+            continue
+        nm = _decode_text(_safe(lambda: r.name) or _safe(lambda: r.get_name()))
+        em = _decode_text(_safe(lambda: r.email_address)
+                          or _safe(lambda: r.get_email_address()))
+        disp = ("%s <%s>" % (nm, em)) if (nm and em) else (em or nm)
+        if not disp:
+            continue
+        rtype = _safe(lambda: r.type, None)
+        if rtype is None:
+            rtype = _safe(lambda: r.recipient_type, None)
+        if rtype == 2:        # MAPI_CC
+            ccs.append(disp)
+        elif rtype == 3:      # MAPI_BCC -> atla
+            continue
+        else:                 # MAPI_TO (1) veya bilinmiyor
+            tos.append(disp)
+    return "; ".join(tos), "; ".join(ccs)
 
 
 def _entry_to_text(entry) -> str:
@@ -274,9 +306,20 @@ def _read_message(pff_msg) -> Message:
     props = _record_props(pff_msg, {
         _TAG_DISPLAY_TO, _TAG_DISPLAY_CC, _TAG_SENDER_NAME, _TAG_SENDER_EMAIL,
         _TAG_SENT_REPR_NAME, _TAG_SENT_REPR_EMAIL,
+        _TAG_RECEIVED_BY_NAME, _TAG_RECEIVED_BY_EMAIL,
     })
-    msg.to = props.get(_TAG_DISPLAY_TO, "")
-    msg.cc = props.get(_TAG_DISPLAY_CC, "")
+    # To/Cc kaynak onceligi: alici tablosu (en zengin) > PR_DISPLAY_TO/CC.
+    rt_to, rt_cc = _read_recipients(pff_msg)
+    msg.to = rt_to or props.get(_TAG_DISPLAY_TO, "")
+    msg.cc = rt_cc or props.get(_TAG_DISPLAY_CC, "")
+    # Hala To yoksa, gelen mailin "alindi" (received-by) alanindan kur.
+    if not msg.to:
+        rbn = props.get(_TAG_RECEIVED_BY_NAME, "")
+        rbe = props.get(_TAG_RECEIVED_BY_EMAIL, "")
+        if rbn and rbe:
+            msg.to = "%s <%s>" % (rbn, rbe)
+        elif rbn or rbe:
+            msg.to = rbn or rbe
     msg.sender_email = (props.get(_TAG_SENDER_EMAIL, "")
                         or props.get(_TAG_SENT_REPR_EMAIL, ""))
     if not msg.sender_name:
