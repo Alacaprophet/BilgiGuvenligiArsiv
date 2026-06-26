@@ -544,6 +544,33 @@ def import_eml_tree_to_pst(
         add("To", 1)   # olTo
         add("Cc", 2)   # olCC
 
+    def _force_display_recipients(item, em):
+        """Kime/CC'yi EML basliklarindan ZORLA doldurur.
+
+        Outlook okuma bolmesindeki 'Kime/Bilgi' alani PR_DISPLAY_TO/CC dizgesini
+        gosterir. Once gercek alicilari ekleriz (cozumlu gorunum), sonra gorunen
+        dizgeyi de dogrudan ayarlariz (en garantili).
+        """
+        to = (em.get("To") or "").strip()
+        cc = (em.get("Cc") or "").strip()
+        # 1) Gercek alici nesnelerini ekle (alici yoksa).
+        _apply_recipients(item, em)
+        # 2) Gorunen Kime/CC dizgesini dogrudan yaz.
+        try:
+            pa = item.PropertyAccessor
+            if to:
+                try:
+                    pa.SetProperty(_PR_DISPLAY_TO, to)
+                except Exception:
+                    pass
+            if cc:
+                try:
+                    pa.SetProperty(_PR_DISPLAY_CC, cc)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _direct_from_eml(folder, path):
         """OpenSharedItem calismadiginda: .eml'i ayristirip mesaji dogrudan kur."""
         with open(path, "rb") as fh:
@@ -579,15 +606,9 @@ def import_eml_tree_to_pst(
                 pass
 
         frm = em.get("From", "") or ""
-        to = em.get("To", "") or ""
-        cc = em.get("Cc", "") or ""
         if frm:
             setp(_PR_SENDER_NAME, frm)
             setp(_PR_SENT_REPR_NAME, frm)
-        if to:
-            setp(_PR_DISPLAY_TO, to)
-        if cc:
-            setp(_PR_DISPLAY_CC, cc)
         dt = em.get("Date")
         if dt:
             try:
@@ -611,7 +632,7 @@ def import_eml_tree_to_pst(
                     pass
             except Exception:
                 continue
-        _apply_recipients(item, em)   # Kime/CC gorunur olsun
+        _force_display_recipients(item, em)   # Kime/CC gorunur olsun
         item.Save()
         _finalize_item(item, folder)
 
@@ -640,20 +661,14 @@ def import_eml_tree_to_pst(
             except Exception:
                 pass
             _ensure_in_folder(it, folder)
-        # OpenSharedItem Kime/CC'yi (adres SMTP degilse) tasimayabilir; bos ise
-        # EML basliklarindan gercek alici olarak ekle.
+        # OpenSharedItem Kime/CC'yi tasimasa/gostermese bile EML basliklarindan
+        # ZORLA doldur (gorunen Kime/Bilgi alani PR_DISPLAY_TO/CC'dir).
         try:
-            need = False
-            try:
-                need = (it.Recipients.Count == 0)
-            except Exception:
-                need = True
-            if need:
-                with open(full, "rb") as fh:
-                    em2 = _email.message_from_binary_file(
-                        fh, policy=_email_policy.default)
-                _apply_recipients(it, em2)
-                it.Save()
+            with open(full, "rb") as fh:
+                em2 = _email.message_from_binary_file(
+                    fh, policy=_email_policy.default)
+            _force_display_recipients(it, em2)
+            it.Save()
         except Exception as exc:
             if _is_disconnect(exc):
                 raise
