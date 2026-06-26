@@ -404,7 +404,6 @@ def import_eml_tree_to_pst(
     fail_logged = 0
     step = max(25, total // 200)
     FLUSH_EVERY = 500
-    used_fallback = {"v": False}
 
     state = {"ns": None, "root": None}
     folder_cache = {}
@@ -560,17 +559,11 @@ def import_eml_tree_to_pst(
         item.Save()
 
     def _write_one(rel, full):
+        # NOT: OpenSharedItem KULLANMIYORUZ. O yontem .eml'i once varsayilan
+        # hesabin TASLAKLAR (Drafts) klasorune koyuyordu; biz hedef yeni PST'nin
+        # ilgili klasorune DOGRUDAN olusturuyoruz (Items.Add). Boylece mesajlar
+        # OST klasor yapisiyla yeni PST icine yazilir, aktif posta kutusuna degil.
         folder = folder_for_rel(rel)
-        # 1) Outlook'un yerlesik .eml ice aktarimi (en yuksek sadakat).
-        try:
-            it = state["ns"].OpenSharedItem(full)
-            it.Move(folder)
-            return
-        except Exception as exc:
-            if _is_disconnect(exc):
-                raise  # disti loop yeniden baglansin
-            # .eml iliskisi yok / acamadi -> ayristirip dogrudan kur.
-            used_fallback["v"] = True
         _direct_from_eml(folder, full)
 
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
@@ -665,8 +658,6 @@ def import_eml_tree_to_pst(
         )
 
     tail = " (yarida kesildi)" if aborted else ""
-    if used_fallback["v"]:
-        tail += " [.eml iliskisi yok -> dogrudan olusturma kullanildi]"
     if fail:
         report(f"Bitti. {success}/{total} mesaj yazildi, {fail} atlandi.{tail}", 1.0)
     else:
