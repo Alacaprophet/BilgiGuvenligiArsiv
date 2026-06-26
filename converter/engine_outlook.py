@@ -368,6 +368,26 @@ def _count_eml(root_dir: str) -> int:
     return total
 
 
+def _ensure_in_folder(item, folder):
+    """Kaydedilen ogeyi hedef klasore zorla tasir.
+
+    Outlook, yeni/gonderilmemis bir mail Save() edilince onu hedef klasor yerine
+    VARSAYILAN hesabin TASLAKLAR klasorune koyabiliyor. Bu yuzden Save sonrasi
+    ogenin gercekten hedef klasorde olup olmadigini kontrol edip degilse Move
+    ile tasiyoruz; boylece mesajlar dogru PST klasorune yazilir.
+    """
+    try:
+        parent = item.Parent
+        if parent is not None and parent.EntryID == folder.EntryID:
+            return  # zaten hedef klasorde
+    except Exception:
+        pass
+    try:
+        item.Move(folder)
+    except Exception:
+        pass
+
+
 @_with_com
 def import_eml_tree_to_pst(
     eml_root: str,
@@ -557,6 +577,7 @@ def import_eml_tree_to_pst(
             except Exception:
                 continue
         item.Save()
+        _ensure_in_folder(item, folder)
 
     def _write_one(rel, full):
         # NOT: OpenSharedItem KULLANMIYORUZ. O yontem .eml'i once varsayilan
@@ -895,6 +916,7 @@ def import_messages_to_pst(
                 continue
 
         item.Save()
+        _ensure_in_folder(item, folder)
 
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
     actual_path = _connect(create=True)
