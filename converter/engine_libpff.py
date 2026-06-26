@@ -31,6 +31,7 @@ tekerlek/wheel gerekebilir). Kurulu degilse ``is_available()`` False doner.
 from __future__ import annotations
 
 import datetime as _dt
+import mimetypes
 import os
 import re
 from email.message import EmailMessage
@@ -87,6 +88,9 @@ class Message:
     def __init__(self):
         self.subject: str = ""
         self.sender_name: str = ""
+        self.sender_email: str = ""
+        self.to: str = ""
+        self.cc: str = ""
         self.headers: str = ""
         self.plain_body: str = ""
         self.html_body: str = ""
@@ -113,6 +117,78 @@ def _safe(getter, default=""):
         return val if val is not None else default
     except Exception:
         return default
+
+
+# Ilgilendigimiz MAPI proptag kimlikleri (entry_type). Bunlari pypff record
+# set'lerinden okuyup ek adlarini ve alici/gonderen alanlarini elde ederiz.
+_TAG_DISPLAY_TO = 0x0E04       # PR_DISPLAY_TO
+_TAG_DISPLAY_CC = 0x0E03       # PR_DISPLAY_CC
+_TAG_SENDER_NAME = 0x0C1A      # PR_SENDER_NAME
+_TAG_SENDER_EMAIL = 0x0C1F     # PR_SENDER_EMAIL_ADDRESS
+_TAG_SENT_REPR_NAME = 0x0042   # PR_SENT_REPRESENTING_NAME
+_TAG_SENT_REPR_EMAIL = 0x0065  # PR_SENT_REPRESENTING_EMAIL_ADDRESS
+_TAG_ATTACH_LONG = 0x3707      # PR_ATTACH_LONG_FILENAME
+_TAG_ATTACH_SHORT = 0x3704     # PR_ATTACH_FILENAME
+_TAG_DISPLAY_NAME = 0x3001     # PR_DISPLAY_NAME
+
+
+def _entry_to_text(entry) -> str:
+    """Bir pypff record-set girdisini metne cevirir (Turkce-guvenli)."""
+    # Once dogrudan string getter'lar.
+    for m in ("get_data_as_string",):
+        try:
+            v = getattr(entry, m)()
+            if v:
+                return v.rstrip("\x00") if isinstance(v, str) else _decode_text(v)
+        except Exception:
+            pass
+    # Ham bayt + deger tipine gore coz.
+    data = None
+    for m in ("get_data",):
+        try:
+            data = getattr(entry, m)()
+            break
+        except Exception:
+            data = None
+    if data is None:
+        data = _safe(lambda: entry.data, None)
+    if not data:
+        return ""
+    vt = _safe(lambda: entry.value_type, None)
+    try:
+        b = bytes(data)
+        if vt == 0x1F:  # PT_UNICODE -> UTF-16-LE
+            return b.decode("utf-16-le", "replace").rstrip("\x00")
+        return _decode_text(b).rstrip("\x00")
+    except Exception:
+        return ""
+
+
+def _record_props(item, wanted) -> dict:
+    """pypff item'in record set'lerinden istenen proptag'lerin metnini dondurur.
+
+    ``wanted``: aranan entry_type (proptag id) kumesi. Donus: {tag: metin}.
+    pypff API'si yoksa/farkliysa sessizce bos dondurur (en kotu ihtimalle eski
+    davranis surer).
+    """
+    out: dict = {}
+    n = _safe(lambda: item.number_of_record_sets, 0) or 0
+    for i in range(n):
+        rs = _safe(lambda i=i: item.get_record_set(i), None)
+        if rs is None:
+            continue
+        ne = _safe(lambda: rs.number_of_entries, 0) or 0
+        for j in range(ne):
+            entry = _safe(lambda j=j: rs.get_entry(j), None)
+            if entry is None:
+                continue
+            et = _safe(lambda: entry.entry_type, None)
+            if et not in wanted or et in out:
+                continue
+            val = _entry_to_text(entry)
+            if val:
+                out[et] = val
+    return out
 
 
 def _message_date(pff_msg):
@@ -163,6 +239,26 @@ def _decode_text(val) -> str:
     return b.decode("utf-8", "replace")
 
 
+def _attachment_name(att, idx: int) -> str:
+    """Ekin GERCEK dosya adini (uzantili) en iyi cabayla bulur."""
+    # 1) Dogrudan ozellikler.
+    for getter in ("get_name", "name", "get_long_filename", "get_short_filename"):
+        try:
+            cand = getattr(att, getter)
+            cand = cand() if callable(cand) else cand
+            if cand:
+                return _decode_text(cand)
+        except Exception:
+            continue
+    # 2) MAPI proptag'lerinden (record set): uzun ad > kisa ad > goruntu adi.
+    props = _record_props(att, {_TAG_ATTACH_LONG, _TAG_ATTACH_SHORT,
+                                _TAG_DISPLAY_NAME})
+    for tag in (_TAG_ATTACH_LONG, _TAG_ATTACH_SHORT, _TAG_DISPLAY_NAME):
+        if props.get(tag):
+            return props[tag]
+    return "ek_%d.bin" % (idx + 1)
+
+
 def _read_message(pff_msg) -> Message:
     msg = Message()
 
@@ -172,6 +268,20 @@ def _read_message(pff_msg) -> Message:
     msg.plain_body = _decode_text(_safe(lambda: pff_msg.plain_text_body))
     msg.html_body = _decode_text(_safe(lambda: pff_msg.html_body))
     msg.date = _message_date(pff_msg)
+
+    # Alici/gonderen alanlarini MAPI ozelliklerinden tamamla (transport_headers
+    # cogu gonderilmis mailde bos olur; PR_DISPLAY_TO/CC ise genelde doludur).
+    props = _record_props(pff_msg, {
+        _TAG_DISPLAY_TO, _TAG_DISPLAY_CC, _TAG_SENDER_NAME, _TAG_SENDER_EMAIL,
+        _TAG_SENT_REPR_NAME, _TAG_SENT_REPR_EMAIL,
+    })
+    msg.to = props.get(_TAG_DISPLAY_TO, "")
+    msg.cc = props.get(_TAG_DISPLAY_CC, "")
+    msg.sender_email = (props.get(_TAG_SENDER_EMAIL, "")
+                        or props.get(_TAG_SENT_REPR_EMAIL, ""))
+    if not msg.sender_name:
+        msg.sender_name = (props.get(_TAG_SENDER_NAME, "")
+                           or props.get(_TAG_SENT_REPR_NAME, ""))
 
     try:
         for i in range(pff_msg.number_of_attachments):
@@ -185,17 +295,8 @@ def _read_message(pff_msg) -> Message:
                     data = att.read_buffer(att.size)
                 except Exception:
                     data = b""
-            name = "ek.bin"
-            for getter in ("get_name", "name"):
-                try:
-                    candidate = getattr(att, getter)
-                    candidate = candidate() if callable(candidate) else candidate
-                    if candidate:
-                        name = candidate
-                        break
-                except Exception:
-                    continue
-            msg.attachments.append(Attachment(str(name), data or b""))
+            msg.attachments.append(Attachment(_attachment_name(att, i),
+                                              data or b""))
     except Exception:
         pass
 
@@ -489,9 +590,30 @@ def _build_eml(msg: Message) -> bytes:
 
     # Konu: her zaman libpff'in temiz degerinden (RFC2047 utf-8 olarak yazilir).
     eml["Subject"] = msg.subject or "(konusuz)"
-    if "From" not in eml and msg.sender_name:
+
+    # From: basliklarda yoksa gonderen ad + e-postadan kur.
+    if "From" not in eml:
+        frm = ""
+        if msg.sender_email and msg.sender_name:
+            frm = '%s <%s>' % (msg.sender_name, msg.sender_email)
+        elif msg.sender_email:
+            frm = msg.sender_email
+        elif msg.sender_name:
+            frm = msg.sender_name
+        if frm:
+            try:
+                eml["From"] = frm
+            except Exception:
+                pass
+    # To / Cc: basliklarda yoksa MAPI display alanlarindan (";" -> ",") kur.
+    if "To" not in eml and msg.to:
         try:
-            eml["From"] = msg.sender_name
+            eml["To"] = msg.to.replace(";", ", ")
+        except Exception:
+            pass
+    if "Cc" not in eml and msg.cc:
+        try:
+            eml["Cc"] = msg.cc.replace(";", ", ")
         except Exception:
             pass
     if "Date" not in eml and msg.date is not None:
@@ -507,13 +629,20 @@ def _build_eml(msg: Message) -> bytes:
     else:
         eml.set_content(msg.plain_body or " ")
 
-    for att in msg.attachments:
+    for idx, att in enumerate(msg.attachments):
         try:
+            fname = _safe_name(att.name, "ek_%d.bin" % (idx + 1))
+            # Icerik tipini uzantidan tahmin et (daha iyi sadakat / acilabilirlik).
+            ctype, _enc = mimetypes.guess_type(fname)
+            if ctype and "/" in ctype:
+                maintype, subtype = ctype.split("/", 1)
+            else:
+                maintype, subtype = "application", "octet-stream"
             eml.add_attachment(
                 att.data,
-                maintype="application",
-                subtype="octet-stream",
-                filename=_safe_name(att.name, "ek.bin"),
+                maintype=maintype,
+                subtype=subtype,
+                filename=fname,
             )
         except Exception:
             continue
