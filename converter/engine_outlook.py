@@ -580,12 +580,28 @@ def import_eml_tree_to_pst(
         _finalize_item(item, folder)
 
     def _write_one(rel, full):
-        # NOT: OpenSharedItem KULLANMIYORUZ. O yontem .eml'i once varsayilan
-        # hesabin TASLAKLAR (Drafts) klasorune koyuyordu; biz hedef yeni PST'nin
-        # ilgili klasorune DOGRUDAN olusturuyoruz (Items.Add). Boylece mesajlar
-        # OST klasor yapisiyla yeni PST icine yazilir, aktif posta kutusuna degil.
         folder = folder_for_rel(rel)
-        _direct_from_eml(folder, full)
+        # 1) TAM SADAKAT: Outlook'un kendi .eml ice-aktaricisi tum basliklari
+        #    (From/To/Cc/Date), govdeyi ve ekleri dogru ayristirir; mesaj normal
+        #    (taslak degil) gelir. Sonra hedef PST klasorune Move ederiz.
+        try:
+            it = state["ns"].OpenSharedItem(full)
+        except Exception as exc:
+            if _is_disconnect(exc):
+                raise
+            # .eml dosya iliskisi yok -> dusuk sadakatli dogrudan olusturmaya dus.
+            _direct_from_eml(folder, full)
+            return
+        try:
+            it.Move(folder)
+        except Exception as exc:
+            if _is_disconnect(exc):
+                raise
+            try:
+                it.Save()
+            except Exception:
+                pass
+            _ensure_in_folder(it, folder)
 
     report("Hedef PST dosyasi olusturuluyor...", 0.0)
     actual_path = _connect(create=True)
